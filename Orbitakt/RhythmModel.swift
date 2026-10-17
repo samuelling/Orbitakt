@@ -45,15 +45,18 @@ enum TempoSource: String, CaseIterable, Identifiable {
 /// into a Euclidean pattern, and drives the engine and the link with the other apps.
 @MainActor
 final class RhythmModel: NSObject, ObservableObject {
+    /// Sparse on purpose: four kicks a bar when four navigation satellites are up (a dub
+    /// four-on-the-floor), two rimshots thrown into the echo, a few hats, and a chord stab that
+    /// comes round twice every twelve steps against the four-four.
     static let specs: [TrackSpec] = [
         TrackSpec(family: .nav, sound: "kick", color: Color(red: 1.0, green: 0.55, blue: 0.25),
-                  defaultSteps: 16, fill: 5.0 / 16),
+                  defaultSteps: 16, fill: 4.0 / 16),
         TrackSpec(family: .leo, sound: "rim", color: Color(red: 0.45, green: 0.85, blue: 0.55),
-                  defaultSteps: 12, fill: 4.0 / 12),
-        TrackSpec(family: .swarm, sound: "shaker", color: Color(red: 0.45, green: 0.75, blue: 1.0),
-                  defaultSteps: 16, fill: 0.5),
-        TrackSpec(family: .belt, sound: "tom", color: Color(red: 0.85, green: 0.6, blue: 1.0),
-                  defaultSteps: 13, fill: 5.0 / 13),
+                  defaultSteps: 16, fill: 2.0 / 16),
+        TrackSpec(family: .swarm, sound: "hat", color: Color(red: 0.45, green: 0.75, blue: 1.0),
+                  defaultSteps: 16, fill: 5.0 / 16),
+        TrackSpec(family: .belt, sound: "stab", color: Color(red: 0.85, green: 0.6, blue: 1.0),
+                  defaultSteps: 12, fill: 2.0 / 12),
     ]
     static let crewColor = Color(red: 1.0, green: 0.85, blue: 0.4)
 
@@ -75,8 +78,13 @@ final class RhythmModel: NSObject, ObservableObject {
     @Published var rootPC = 2 { didSet { save() } }                 // D
     @Published var tempoSource = TempoSource.orbit { didSet { save() } }
     @Published var manualBPM = 84.0 { didSet { save() } }
-    @Published var swing = 0.08 { didSet { save(); engine.params[.swing] = Float(swing) } }
-    @Published var space = 0.55 { didSet { save(); engine.setSpace(space) } }
+    @Published var swing = 0.1 { didSet { save(); engine.params[.swing] = Float(swing) } }
+    @Published var space = 0.6 { didSet { save(); engine.setSpace(space) } }
+    /// Echo feedback, 0…0.85.
+    @Published var dub = 0.55 { didSet { save(); engine.params[.dub] = Float(dub) } }
+    @Published var dustOn = true { didSet { save() } }
+    /// 0…1: how far the echo send is thrown open right now (decays over a few seconds).
+    @Published private(set) var throwLevel = 0.0
     @Published var pingRadius = 4.0 { didSet { save() } }           // degrees from the zenith
     @Published var gongOn = true { didSet { save() } }
 
@@ -129,6 +137,7 @@ final class RhythmModel: NSObject, ObservableObject {
         load()
         let p = engine.params
         p[.swing] = Float(swing)
+        p[.dub] = Float(dub)
         for (i, t) in tracks.enumerated() {
             p.pLen[i] = Float(t.steps)
             p.mute[i] = t.muted ? 1 : 0
@@ -316,6 +325,8 @@ final class RhythmModel: NSObject, ObservableObject {
         if let arrival = members.filter({ !run.ids.contains($0.id) }).max(by: { $0.el < $1.el }),
            !run.ids.isEmpty || run.newestAz < 0 {
             run.newestAz = Double(arrival.az)
+            // A low-orbit satellite crossing into its cone throws the echo send open
+            if t == 1 && !run.ids.isEmpty && dt > 0 { throwEcho(0.55 + 0.45 * Double.random(in: 0...1)) }
         }
         if run.newestAz < 0, let top = members.max(by: { $0.el < $1.el }) { run.newestAz = Double(top.az) }
         run.ids = ids
@@ -343,17 +354,41 @@ final class RhythmModel: NSObject, ObservableObject {
         for off in 0..<n {
             let st = (rot + off) % n
             let i = t * S + st
-            p.pHit[i] = hits[st] ? 1 : 0
+            p.pHit[i] = 0
             guard hits[st], j < chosen.count else { continue }
             let b = chosen[j]
             j += 1
             let el = Double(b.el), az = Double(b.az) * .pi / 180
-            p.pVel[i] = Float(0.4 + 0.6 * clamp01((el - (90 - cone)) / max(1, cone)))
+            let height = clamp01((el - (90 - cone)) / max(1, cone))   // 0 at the cone's rim, 1 at the zenith
+            // Machinedrum-style trig probability: high satellites always play, the ones near the
+            // rim of the cone flicker in and out. The kick stays steady.
+            let prob: Double
+            switch t {
+            case 0: prob = 1
+            case 3: prob = 0.7 + 0.3 * height
+            default: prob = 0.45 + 0.55 * height
+            }
+            p.pHit[i] = Float(prob)
+            p.pVel[i] = Float(t == 0 ? 0.55 + 0.35 * height : 0.35 + 0.65 * height)
             p.pPan[i] = Float(max(-0.9, min(0.9, sin(az) * cos(el * .pi / 180) * 1.1)))
             p.pFreq[i] = Float(pitch(track: t, blip: b, root: root, scale: sc))
+            if t == 3 {
+                let d = stabDegree(b, sc)
+                let base = semis(d, sc)
+                p.pC1[i] = Float(pow(2, Double(semis(d + 2, sc) - base) / 12))
+                p.pC2[i] = Float(pow(2, Double(semis(d + 4, sc) - base) / 12))
+                p.pC3[i] = Float(pow(2, Double(semis(d + (sc.count >= 7 ? 6 : 5), sc) - base) / 12))
+            }
         }
         p.pLen[t] = Float(n)
-        p.bright[t] = Float(t == 2 ? clamp01(Double(members.map(\.el).max() ?? 45) / 90) : 0.5)
+        switch t {
+        case 2:   // hats brighten with a busier Starlink sky
+            p.bright[t] = Float(clamp01(Double(fam.count) / 450))
+        case 3:   // the chord opens a little in daylight, when Bellweathered can tell us
+            p.bright[t] = Float(0.35 + 0.4 * (leads["bellweather"]?.state.day ?? 0.4))
+        default:
+            p.bright[t] = 0.5
+        }
         p.pGen[t] += 1
 
         var v = tracks[t]
@@ -374,17 +409,29 @@ final class RhythmModel: NSObject, ObservableObject {
 
     private func pitch(track t: Int, blip b: Blip, root: Int, scale sc: [Int]) -> Double {
         switch t {
-        case 0:   // kick on the root, low (G1…F♯2, 49–92 Hz)
-            return mtof(Double(31 + (root + 5) % 12))
-        case 1:   // rim on the fifth-ish degree, in the woodblock register
-            return mtof(Double(72 + root + semis(2, sc)))
-        case 3:   // the belt is a xylophone strung across your sky: east low, west high
-            let x = clamp01((1 - sin(Double(b.az) * .pi / 180)) / 2)   // east 0 … west 1
-            let d = Int((x * Double(2 * sc.count - 1)).rounded())
-            return mtof(Double(48 + root + semis(d, sc)))
+        case 0:   // a deep kick on the root (F1…E2, 44–82 Hz)
+            return mtof(Double(29 + (root + 7) % 12))
+        case 1:   // rimshot tuned to a scale degree, up where it cuts through the echo
+            return mtof(Double(81 + root + semis(2, sc)))
+        case 2:   // hat partials sit in a fixed metallic band
+            return 5400
+        case 3:   // the stab's chord root, from where the satellite sits along the belt
+            return mtof(Double(48 + root + semis(stabDegree(b, sc), sc)))
         default:
             return 1000
         }
+    }
+
+    /// The belt is strung across your sky like a keyboard: east is the root, west an octave up.
+    private func stabDegree(_ b: Blip, _ sc: [Int]) -> Int {
+        let x = clamp01((1 - sin(Double(b.az) * .pi / 180)) / 2)   // east 0 … west 1
+        return Int((x * Double(sc.count - 1)).rounded())
+    }
+
+    /// Throw the echo send open (a dub move); it falls back over a few seconds.
+    private func throwEcho(_ amount: Double) {
+        throwLevel = max(throwLevel, min(1, amount))
+        engine.params[.throwAmt] = Float(throwLevel)
     }
 
     // MARK: Events
@@ -405,10 +452,11 @@ final class RhythmModel: NSObject, ObservableObject {
         let slot = pingSlot
         pingSlot = (pingSlot + 1) % OrbitParams.pingSlots
         p.evFreq[slot] = Float(mtof(Double(72 + rootPC + semis(d, sc))))
-        p.evVel[slot] = Float(Double.random(in: 0.6...1))
+        p.evVel[slot] = Float(Double.random(in: 0.55...0.9))
         let az = Double(b.az) * .pi / 180
         p.evPan[slot] = Float(sin(az) * 0.6)
         p.evTrig[slot] += 1
+        throwEcho(0.85)
         pings.append((Double(b.az), Double(b.el), now))
     }
 
@@ -459,11 +507,17 @@ final class RhythmModel: NSObject, ObservableObject {
         }
         effectiveBPM = bpm
         engine.params[.bpm] = Float(bpm)
-        engine.setTempo(bpm)
+        // Dust: a breath of hiss and crackle that thickens with the crowd overhead
+        engine.params[.dust] = Float(dustOn ? 0.25 + 0.75 * clamp01(Double(s.blips.count) / 1500) : 0)
     }
 
     private func fastTick() {
         let now = ProcessInfo.processInfo.systemUptime
+        if throwLevel > 0.001 {
+            throwLevel *= exp(-0.25 / 2.5)
+            if throwLevel < 0.01 { throwLevel = 0 }
+            engine.params[.throwAmt] = Float(throwLevel)
+        }
         let stale = leads.filter { now - $0.value.at > 10 }.map { $0.key }
         if !stale.isEmpty {
             for r in stale { leads[r] = nil }
@@ -528,15 +582,17 @@ final class RhythmModel: NSObject, ObservableObject {
         d.set(rootPC, forKey: "o.root")
         d.set(tempoSource.rawValue, forKey: "o.tempo")
         d.set(manualBPM, forKey: "o.bpm")
-        d.set(swing, forKey: "o.swing")
-        d.set(space, forKey: "o.space")
+        d.set(swing, forKey: "o2.swing")
+        d.set(space, forKey: "o2.space")
+        d.set(dub, forKey: "o2.dub")
+        d.set(dustOn, forKey: "o2.dust")
         d.set(pingRadius, forKey: "o.ping")
         d.set(gongOn, forKey: "o.gong")
         d.set(followTempo, forKey: "o.followTempo")
         d.set(followKey, forKey: "o.followKey")
-        d.set(tracks.map(\.steps), forKey: "o.steps")
+        d.set(tracks.map(\.steps), forKey: "o2.steps")
         d.set(tracks.map(\.muted), forKey: "o.mutes")
-        d.set(runs.map { $0.manualCone ?? -1 }, forKey: "o.cones")
+        d.set(runs.map { $0.manualCone ?? -1 }, forKey: "o2.cones")
     }
 
     private func load() {
@@ -548,19 +604,21 @@ final class RhythmModel: NSObject, ObservableObject {
         if d.object(forKey: "o.root") != nil { rootPC = d.integer(forKey: "o.root") }
         if let t = d.string(forKey: "o.tempo"), let ts = TempoSource(rawValue: t) { tempoSource = ts }
         if d.object(forKey: "o.bpm") != nil { manualBPM = d.double(forKey: "o.bpm") }
-        if d.object(forKey: "o.swing") != nil { swing = d.double(forKey: "o.swing") }
-        if d.object(forKey: "o.space") != nil { space = d.double(forKey: "o.space") }
+        if d.object(forKey: "o2.swing") != nil { swing = d.double(forKey: "o2.swing") }
+        if d.object(forKey: "o2.space") != nil { space = d.double(forKey: "o2.space") }
+        if d.object(forKey: "o2.dub") != nil { dub = min(0.85, max(0, d.double(forKey: "o2.dub"))) }
+        if d.object(forKey: "o2.dust") != nil { dustOn = d.bool(forKey: "o2.dust") }
         if d.object(forKey: "o.ping") != nil { pingRadius = d.double(forKey: "o.ping") }
         if d.object(forKey: "o.gong") != nil { gongOn = d.bool(forKey: "o.gong") }
         if d.object(forKey: "o.followTempo") != nil { followTempo = d.bool(forKey: "o.followTempo") }
         if d.object(forKey: "o.followKey") != nil { followKey = d.bool(forKey: "o.followKey") }
-        if let s = d.array(forKey: "o.steps") as? [Int], s.count == tracks.count {
+        if let s = d.array(forKey: "o2.steps") as? [Int], s.count == tracks.count {
             for i in s.indices { tracks[i].steps = max(3, min(OrbitParams.maxSteps, s[i])) }
         }
         if let m = d.array(forKey: "o.mutes") as? [Bool], m.count == tracks.count {
             for i in m.indices { tracks[i].muted = m[i] }
         }
-        if let c = d.array(forKey: "o.cones") as? [Double], c.count == runs.count {
+        if let c = d.array(forKey: "o2.cones") as? [Double], c.count == runs.count {
             for i in c.indices where c[i] > 0 {
                 runs[i].manualCone = c[i]
                 tracks[i].auto = false

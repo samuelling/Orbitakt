@@ -170,14 +170,26 @@ private struct OrbitSettingsView: View {
                         Text(String(format: "Swing: %.0f%%", model.swing * 100))
                         Slider(value: $model.swing, in: 0...0.3)
                     }
-                    VStack(alignment: .leading) {
-                        Text("Space")
-                        Slider(value: $model.space, in: 0...1)
-                    }
                 } header: {
                     Text("Music")
                 } footer: {
-                    Text("Orbit tempo is the period of the low orbits overhead, thirteen octaves up: a 95-minute orbit × 2¹³ ≈ 86 BPM. The NAV kick sits on the root, the BELT tom plays the scale across the geostationary arc (east low, west high).")
+                    Text("Orbit tempo is the period of the low orbits overhead, thirteen octaves up: a 95-minute orbit × 2¹³ ≈ 86 BPM.")
+                }
+
+                Section {
+                    VStack(alignment: .leading) {
+                        Text(String(format: "Dub echo feedback: %.0f%%", model.dub * 100))
+                        Slider(value: $model.dub, in: 0...0.85)
+                    }
+                    VStack(alignment: .leading) {
+                        Text("Plate")
+                        Slider(value: $model.space, in: 0...1)
+                    }
+                    Toggle("Dust", isOn: $model.dustOn)
+                } header: {
+                    Text("Dub")
+                } footer: {
+                    Text("A ping-pong echo on a dotted eighth, darker and rounder with every repeat. Rimshots and pings go mostly into it, the kick hardly at all. Whenever a low-orbit satellite crosses into its cone, or something passes straight overhead, the echo send is thrown open for a few seconds. Dust is a breath of hiss and crackle that thickens with the crowd overhead.")
                 }
 
                 Section {
@@ -229,10 +241,10 @@ private struct TrackSettings: View {
 
     private func footer(_ f: Family) -> String {
         switch f {
-        case .nav: return "GPS, Galileo, GLONASS and BeiDou, 20,000 km up. They cross the sky in hours, so this pattern changes slowly."
-        case .leo: return "Low orbits other than Starlink: OneWeb, Iridium, weather and science satellites. Each crosses the sky in about ten minutes."
-        case .swarm: return "Starlink. Thousands of them, so the cone is narrow and the pattern turns over every few seconds."
-        case .belt: return "The geostationary belt: a fixed arc across your sky, to the south in the northern hemisphere. It never moves, so this pattern is your location's fingerprint, tuned east (low) to west (high)."
+        case .nav: return "GPS, Galileo, GLONASS and BeiDou, 20,000 km up. The cone holds about four, so with four up it's four on the floor; three or five bend it. They cross the sky in hours, so the kick changes slowly. A deep kick on the root."
+        case .leo: return "Low orbits other than Starlink: OneWeb, Iridium, weather and science satellites. About two in the cone; each crosses the sky in roughly ten minutes. A tuned rimshot, mostly into the echo, and each new arrival throws the echo open."
+        case .swarm: return "Starlink. Thousands of them, so the cone is narrow and the pattern turns over every few seconds. Metallic hats that brighten as more of the swarm is up; the ones near the cone's rim only sometimes play."
+        case .belt: return "The geostationary belt: a fixed arc across your sky, to the south in the northern hemisphere. It never moves, so this pattern is your location's fingerprint. A dub chord stab built on the scale, its root set by where the satellite sits on the arc (east low, west high), drifting twelve against sixteen."
         default: return ""
         }
     }

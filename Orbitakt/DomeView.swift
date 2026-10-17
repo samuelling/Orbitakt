@@ -47,6 +47,12 @@ struct DomeView: View {
             Gradient(colors: [Color(red: 0.05, green: 0.07, blue: 0.16), Color(red: 0.01, green: 0.01, blue: 0.04)]),
             center: c, startRadius: 0, endRadius: R))
         ctx.stroke(circle(c, R), with: .color(.white.opacity(0.18)), lineWidth: 1)
+        // A dub throw lights the horizon in the rimshot's colour while the echo spirals
+        if model.throwLevel > 0.02 {
+            let th = model.throwLevel
+            ctx.stroke(circle(c, R), with: .color(RhythmModel.specs[1].color.opacity(0.55 * th)),
+                       lineWidth: 1 + 3 * CGFloat(th))
+        }
         for z in [30.0, 60.0] {
             ctx.stroke(circle(c, R * CGFloat(z / 90)), with: .color(.white.opacity(0.06)), lineWidth: 1)
         }

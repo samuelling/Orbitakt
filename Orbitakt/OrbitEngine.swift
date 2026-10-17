@@ -2,17 +2,17 @@ import AVFoundation
 
 /// AVAudioEngine graph:
 ///
-///   OrbitDSP dry bus ────────────────────────────────────────────── main out
-///   OrbitDSP send bus ── delay (dotted eighth) ── hall reverb ── EQ ─┘
+///   OrbitDSP dry bus (drums + dub echoes) ─────────────── main out
+///   OrbitDSP plate send ────────── plate reverb ── EQ ───┘
 ///
-/// The two buses come from one DSP through two source nodes; the dry node renders both and
-/// the send node hands over what it rendered. The reverb return is high-passed so the kick's
-/// tail never muddies the room.
+/// The dub delay runs inside OrbitDSP (it needs feedback filtering, saturation and wow that
+/// AVAudioUnitDelay can't do). The two buses come from one DSP through two source nodes; the
+/// dry node renders both and the send node hands over what it rendered. The plate return is
+/// high-passed so the kick's tail never muddies it.
 final class OrbitEngine {
     let params = OrbitParams()
 
     private let engine = AVAudioEngine()
-    private let delay = AVAudioUnitDelay()
     private let reverb = AVAudioUnitReverb()
     private let eq = AVAudioUnitEQ(numberOfBands: 2)
     private var dryNode: AVAudioSourceNode?
@@ -21,25 +21,21 @@ final class OrbitEngine {
     private var wantsRunning = false
     private var stopToken = 0
     private var observers: [NSObjectProtocol] = []
-    private var lastDelay = 0.0, lastSpace = -1.0
+    private var lastSpace = -1.0
 
     init() {
-        delay.delayTime = 0.5
-        delay.feedback = 38
-        delay.lowPassCutoff = 3800
-        delay.wetDryMix = 42
-        reverb.loadFactoryPreset(.largeHall2)
+        reverb.loadFactoryPreset(.plate)
         reverb.wetDryMix = 100
         let hp = eq.bands[0]
         hp.filterType = .highPass
-        hp.frequency = 220
+        hp.frequency = 320
         hp.bypass = false
         let lp = eq.bands[1]
         lp.filterType = .lowPass
-        lp.frequency = 7500
+        lp.frequency = 6000
         lp.bypass = false
         eq.globalGain = 0
-        [delay, reverb, eq].forEach { engine.attach($0) }
+        [reverb, eq].forEach { engine.attach($0) }
 
         let nc = NotificationCenter.default
         observers.append(nc.addObserver(forName: AVAudioSession.interruptionNotification,
@@ -59,18 +55,12 @@ final class OrbitEngine {
 
     var isRunning: Bool { engine.isRunning }
 
-    /// Echo on a dotted eighth (0.75 beat), inside AVAudioUnitDelay's 2 s limit.
-    func setTempo(_ bpm: Double) {
-        let t = min(2.0, max(0.05, 60 / max(20, bpm) * 0.75))
-        if abs(t - lastDelay) > 0.005 { lastDelay = t; delay.delayTime = t }
-    }
-
-    /// 0…1: how big the space is (reverb return level and echo feedback).
+    /// 0…1: how much plate.
     func setSpace(_ x: Double) {
         guard abs(x - lastSpace) > 0.01 else { return }
         lastSpace = x
-        eq.globalGain = Float(20 * log10(max(0.05, 0.35 + 0.9 * x)))
-        delay.feedback = Float(20 + 30 * x)
+        params[.reverbSend] = Float(0.2 + 0.8 * x)
+        eq.globalGain = Float(20 * log10(max(0.05, 0.5 + 0.7 * x)))
     }
 
     func start() throws {
@@ -80,7 +70,7 @@ final class OrbitEngine {
         if dryNode == nil { buildGraph() }
         wantsRunning = true
         stopToken += 1
-        params[.master] = 0.7
+        params[.master] = 0.85
         if !engine.isRunning { try engine.start() }
     }
 
@@ -126,8 +116,7 @@ final class OrbitEngine {
         engine.attach(send)
         let mixer = engine.mainMixerNode
         engine.connect(dry, to: mixer, format: format)
-        engine.connect(send, to: delay, format: format)
-        engine.connect(delay, to: reverb, format: format)
+        engine.connect(send, to: reverb, format: format)
         engine.connect(reverb, to: eq, format: format)
         engine.connect(eq, to: mixer, format: format)
         mixer.outputVolume = 0.9
