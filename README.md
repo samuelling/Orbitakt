@@ -29,9 +29,9 @@ Polymeter is on by default (16, 12, 16 and 13 steps) so the four patterns drift 
 
 ## Playing together
 
-Orbitakt joins Aether and Bellweathered over MultipeerConnectivity (Bluetooth or peer-to-peer Wi-Fi, no router needed), using the same service and message format. Bellweathered's sky sets the key, Aether's radio room sets the tempo, and Orbitakt sends back how many satellites are up and whether a crew is overhead.
+Orbitakt listens in on Aether and Bellweathered over MultipeerConnectivity (Bluetooth or peer-to-peer Wi-Fi, no router needed), the same way Leitmotif does. Bellweathered's sky sets the key, Aether's radio room sets the tempo (folded by octaves into 60–132 BPM), and the orbits keep the rhythm. Both are optional, and each can be switched off in Settings › Together.
 
-`Shared/DuoLink.swift` here is a mesh version of the duo link: one phone per app, all in one session, so three or more can play at once. Aether and Bellweathered still use the pairwise version. They will connect to Orbitakt and the music works (each app only reads the fields it follows), but until they pick up this file their status line can mislabel Orbitakt as Bellweathered.
+Aether and Bellweathered are the two *leads* and pair with each other; any other app is a *listener* that never invites and never sends, and both leads invite it in. So all four apps can play at once and the duo behaves exactly as before. The leads' Settings › Duo lists Orbitakt under "Listening in". `Shared/DuoLink.swift` is an identical copy of the Aether repo's (and Leitmotif's `Duo/` copy): change all three together.
 
 ## Data and accuracy
 

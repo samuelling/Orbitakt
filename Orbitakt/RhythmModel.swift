@@ -83,9 +83,14 @@ final class RhythmModel: NSObject, ObservableObject {
     // Link
     let duo = DuoLink(role: "orbitakt")
     @Published private(set) var partnerSummary: String?
+    /// "Bellweathered + Aether" while we're listening to them, else nil.
+    @Published private(set) var linkName: String?
     @Published var followTempo = true { didSet { save() } }
     @Published var followKey = true { didSet { save() } }
     private var partnerBPM: Double?
+    /// The latest state from each lead and when it arrived. Orbitakt is a listener: it never
+    /// sends, so each lead is forgotten 10 s after it goes quiet.
+    private var leads: [String: (state: DuoState, at: TimeInterval)] = [:]
 
     /// Recent zenith pings, for the dome to draw (not published; the dome redraws anyway).
     private(set) var pings: [(az: Double, el: Double, t: TimeInterval)] = []
@@ -115,7 +120,6 @@ final class RhythmModel: NSObject, ObservableObject {
     private var lastGongBar = -1
     private var crewUp = false
     private var crewEl = 0.0
-    private var lastDuoSend: TimeInterval = 0
     private var ticker: Timer?
 
     var steps: [Int] { DuoScales.all[max(0, min(DuoScales.all.count - 1, scaleIndex))].steps }
@@ -153,7 +157,7 @@ final class RhythmModel: NSObject, ObservableObject {
         ticker = t
 
         duo.onState = { [weak self] s in MainActor.assumeIsolated { self?.receiveDuo(s) } }
-        duo.onLost = { [weak self] r in MainActor.assumeIsolated { self?.partnerLost(r) } }
+        duo.onLost = { [weak self] in MainActor.assumeIsolated { self?.forgetLeads() } }
         duo.start()
     }
 
@@ -460,50 +464,56 @@ final class RhythmModel: NSObject, ObservableObject {
 
     private func fastTick() {
         let now = ProcessInfo.processInfo.systemUptime
-        if now - lastDuoSend > 2 { publishDuo(now: now) }
+        let stale = leads.filter { now - $0.value.at > 10 }.map { $0.key }
+        if !stale.isEmpty {
+            for r in stale { leads[r] = nil }
+            leadsChanged()
+        }
     }
 
-    // MARK: Link
-
-    private func publishDuo(now: TimeInterval) {
-        lastDuoSend = now
-        var s = DuoState(role: "orbitakt")
-        s.rootPC = rootPC
-        s.scaleSteps = steps
-        s.bpm = effectiveBPM
-        s.satellites = snapshot.blips.count
-        s.crewOverhead = crewUp
-        s.place = live ? place : "simulated sky"
-        duo.send(s)
-    }
+    // MARK: Link (Orbitakt listens in on Aether and Bellweathered, like Leitmotif)
 
     private func receiveDuo(_ s: DuoState) {
-        let others = duo.partners
-        // Key: Bellweathered's sky leads; Aether carries it on when the sky isn't here.
-        let keySource = others["bellweather"] ?? others["aether"]
+        guard s.role == "aether" || s.role == "bellweather" else { return }
+        let isNew = leads[s.role] == nil
+        leads[s.role] = (s, ProcessInfo.processInfo.systemUptime)
+        // Key: Bellweathered's sky leads; Aether carries it on when the sky isn't here
+        // (Aether follows the sky's key itself, so they agree when both are present).
+        let keySource = leads["bellweather"]?.state ?? leads["aether"]?.state
         if followKey, let k = keySource, k.role == s.role {
             if let pc = k.rootPC, (0..<12).contains(pc), pc != rootPC { rootPC = pc }
             if let st = k.scaleSteps, let i = DuoScales.all.firstIndex(where: { $0.steps == st }),
                i != scaleIndex { scaleIndex = i }
         }
-        // Time: Aether's radio room leads.
-        if s.role == "aether" { partnerBPM = s.bpm.flatMap { $0.isFinite && $0 > 1 && $0 < 1000 ? $0 : nil } }
+        if isNew { leadsChanged() } else { summarize() }
+    }
+
+    private func forgetLeads() {
+        leads.removeAll()
+        leadsChanged()
+    }
+
+    private func leadsChanged() {
+        let names = ["bellweather", "aether"].filter { leads[$0] != nil }.map(DuoLink.appName(of:))
+        linkName = names.isEmpty ? nil : names.joined(separator: " + ")
+        summarize()
+    }
+
+    /// Tempo from Aether (time leads there), and a one-line summary for Settings.
+    private func summarize() {
+        partnerBPM = leads["aether"]?.state.bpm.flatMap { $0.isFinite && $0 > 1 && $0 < 1000 ? $0 : nil }
         var bits: [String] = []
-        if let a = others["aether"] {
+        if let a = leads["aether"]?.state {
             if let d = a.devices { bits.append("\(d) devices") }
             if let b = a.bpm { bits.append("\(Int(b.rounded())) BPM") }
         }
-        if let b = others["bellweather"] {
+        if let b = leads["bellweather"]?.state {
             if let t = b.tempF { bits.append("\(Int(t.rounded()))°F") }
             if let c = b.cloud { bits.append("\(Int(c.rounded()))% cloud") }
             if let pl = b.place, !pl.isEmpty { bits.append(pl) }
         }
-        partnerSummary = bits.isEmpty ? nil : bits.joined(separator: " · ")
-    }
-
-    private func partnerLost(_ role: String) {
-        if role == "aether" { partnerBPM = nil }
-        if duo.partners.isEmpty { partnerSummary = nil }
+        let text = bits.isEmpty ? nil : bits.joined(separator: " · ")
+        if text != partnerSummary { partnerSummary = text }
     }
 
     // MARK: Persistence

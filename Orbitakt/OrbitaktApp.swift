@@ -55,8 +55,8 @@ struct OrbitContentView: View {
                 Text(model.status)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                if let partner = model.duo.partnerName {
-                    Label("With \(partner)", systemImage: "link")
+                if let partner = model.linkName {
+                    Label("Listening to \(partner)", systemImage: "link")
                         .font(.caption2)
                         .foregroundStyle(.cyan)
                 }
@@ -190,7 +190,7 @@ private struct OrbitSettingsView: View {
                 } header: {
                     Text("Together")
                 } footer: {
-                    Text("With Aether or Bellweathered on other iPhones nearby, they find each other automatically, no Wi-Fi network needed. Bellweathered's sky sets the key, Aether's radio room sets the tempo, and the orbits keep the rhythm.")
+                    Text("With Aether or Bellweathered on other iPhones nearby, Orbitakt listens in automatically, no Wi-Fi network needed: Bellweathered's sky sets the key, Aether's radio room sets the tempo, and the orbits keep the rhythm. Like Leitmotif, it only listens, so the duo plays exactly as before.")
                 }
             }
             .navigationTitle("Settings")

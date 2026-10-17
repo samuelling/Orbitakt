@@ -23,6 +23,13 @@ struct DuoControls: View {
             Spacer()
             status.foregroundStyle(duo.phase == .connected ? Color.cyan : Color.secondary)
         }
+        if !duo.listeners.isEmpty {
+            HStack {
+                Text("Listening in")
+                Spacer()
+                Text(duo.listeners.joined(separator: ", ")).foregroundStyle(Color.pink)
+            }
+        }
         if duo.phase == .paused {
             Button("Search again") { duo.searchAgain() }
         }
