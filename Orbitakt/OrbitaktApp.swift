@@ -143,7 +143,7 @@ private struct OrbitSettingsView: View {
                 } header: {
                     Text("Events")
                 } footer: {
-                    Text("Anything that passes almost directly overhead rings a glass bar, pitched by its catalog number. While the ISS or Tiangong is above the horizon, a gong sounds every two bars.")
+                    Text("Anything that passes almost directly overhead rings a glass bar, pitched by its catalog number. While the ISS or Tiangong is above the horizon, a gong sounds every four bars.")
                 }
 
                 Section {
@@ -166,6 +166,11 @@ private struct OrbitSettingsView: View {
                         Text(String(format: "Orbit tempo: %.1f BPM", model.orbitBPM))
                             .foregroundStyle(.secondary)
                     }
+                    Picker("Steps", selection: $model.division) {
+                        Text("Eighths").tag(2)
+                        Text("Sixteenths").tag(4)
+                    }
+                    .pickerStyle(.segmented)
                     VStack(alignment: .leading) {
                         Text(String(format: "Swing: %.0f%%", model.swing * 100))
                         Slider(value: $model.swing, in: 0...0.3)
@@ -173,7 +178,7 @@ private struct OrbitSettingsView: View {
                 } header: {
                     Text("Music")
                 } footer: {
-                    Text("Orbit tempo is the period of the low orbits overhead, thirteen octaves up: a 95-minute orbit × 2¹³ ≈ 86 BPM.")
+                    Text("Orbit tempo is the period of the low orbits overhead, thirteen octaves up: a 95-minute orbit × 2¹³ ≈ 86 BPM. Steps are eighths by default, so each pattern spans two bars and the groove sits in half-time; sixteenths double the pace.")
                 }
 
                 Section {
@@ -241,10 +246,10 @@ private struct TrackSettings: View {
 
     private func footer(_ f: Family) -> String {
         switch f {
-        case .nav: return "GPS, Galileo, GLONASS and BeiDou, 20,000 km up. The cone holds about four, so with four up it's four on the floor; three or five bend it. They cross the sky in hours, so the kick changes slowly. A deep kick on the root."
+        case .nav: return "GPS, Galileo, GLONASS and BeiDou, 20,000 km up. The cone holds about four, so with four up it's a steady half-time pulse; three or five bend it. They cross the sky in hours, so the kick changes slowly. A deep kick on the root."
         case .leo: return "Low orbits other than Starlink: OneWeb, Iridium, weather and science satellites. About two in the cone; each crosses the sky in roughly ten minutes. A tuned rimshot, mostly into the echo, and each new arrival throws the echo open."
         case .swarm: return "Starlink. Thousands of them, so the cone is narrow and the pattern turns over every few seconds. Metallic hats that brighten as more of the swarm is up; the ones near the cone's rim only sometimes play."
-        case .belt: return "The geostationary belt: a fixed arc across your sky, to the south in the northern hemisphere. It never moves, so this pattern is your location's fingerprint. A dub chord stab built on the scale, its root set by where the satellite sits on the arc (east low, west high), drifting twelve against sixteen."
+        case .belt: return "The geostationary belt: a fixed arc across your sky, to the south in the northern hemisphere. It never moves, so this pattern is your location's fingerprint. A soft breath of air with no pitch: darker for satellites in the east, airier toward the west. It drifts twelve against sixteen."
         default: return ""
         }
     }

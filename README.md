@@ -8,18 +8,20 @@ It's the percussion piece of the environmental set with [Aether](https://github.
 
 | Track | Satellites | Sound | In the cone | Character |
 |---|---|---|---|---|
-| **NAV** | GPS, Galileo, GLONASS, BeiDou (~20,000 km) | deep kick on the root | ~4 of 16 | Four up is four on the floor; three or five bend it. Changes over hours |
+| **NAV** | GPS, Galileo, GLONASS, BeiDou (~20,000 km) | deep kick on the root | ~4 of 16 | Four up is a steady half-time pulse; three or five bend it. Changes over hours |
 | **LEO** | Low orbits except Starlink: OneWeb, Iridium, weather and science satellites | tuned rimshot, mostly into the echo | ~2 of 16 | A few arrivals a minute, and each one throws the echo |
 | **SWARM** | Starlink | metallic hat, brighter as more of the swarm is up | ~5 of 16 | Turns over every few seconds |
-| **BELT** | The geostationary belt | dub chord stab | ~2 of 12 | Never moves: your location's fingerprint, drifting 12 against 16 |
+| **BELT** | The geostationary belt | swish: a soft breath of air, no pitch | ~2 of 12 | Never moves: your location's fingerprint, drifting 12 against 16 |
 
 **The cone.** Each track listens to a cone of sky around the zenith. By default the cone adapts like contrast gain control: it settles where it holds about the target number of satellites on average, then follows slowly (60 s time constant). The long-run density is divided out, and the moment-to-moment comings and goings pass straight through as changes in k. You can fix a cone by hand in Settings.
 
 **One hit per satellite.** The playhead sweeps the sky clockwise from north once per bar. Euclid's algorithm spreads the k hits evenly, the bar is rotated to start at the newest arrival's bearing, and each hit plays the next satellite clockwise. East–west position sets pan. A new pattern is adopted only when its track wraps, so changes land on the bar line.
 
-**Trig probability.** Like a Machinedrum trig condition, each step holds a chance rather than a plain on/off: satellites high in their cone always play, ones near the rim flicker in and out (about 45% at the rim for rimshots and hats, 70% for stabs; the kick always plays). Height also sets velocity.
+**Trig probability.** Like a Machinedrum trig condition, each step holds a chance rather than a plain on/off: satellites high in their cone always play, ones near the rim flicker in and out (about 45% at the rim for rimshots and hats, 70% for the swish; the kick always plays). Height also sets velocity.
 
-**The stab.** BELT hits play a four-note chord built on the scale (root, third, fifth and seventh degree, or a sus-style voicing in five-note scales). The chord's root comes from where that satellite sits along the geostationary arc, east low to west high. Four detuned saws go through a resonant lowpass that snaps shut, the classic dub-techno chord, and almost all of it goes into the echo. With Bellweathered nearby, daylight opens the filter a little.
+**The swish.** BELT hits are a soft-attacked breath of band-passed noise with no pitch at all, mostly into the echo. Its colour comes from where that satellite sits along the geostationary arc: darker in the east (about 700 Hz), airier toward the west (about 4.5 kHz).
+
+**Half-time by default.** Steps are eighth notes, so a 16-step pattern spans two bars and the kick's four hits land on every other beat. Settings › Music › Steps switches to sixteenths for double the pace.
 
 **The dub echo** is built into the engine: a stereo ping-pong on a dotted eighth, high- and low-passed and gently saturated in the loop, so repeats get darker and rounder, with a touch of tape wow. A plate reverb sits after it.
 - *Throws:* whenever a low-orbit satellite crosses into its cone, or something passes straight overhead, the echo send is thrown open and the feedback pushed toward a spiral. It falls back over a few seconds, the way a dub engineer rides the send. The dome's horizon glows while it happens.
@@ -27,7 +29,7 @@ It's the percussion piece of the environmental set with [Aether](https://github.
 
 **Events.**
 - *Zenith pings:* anything passing within 4° of straight up (adjustable) rings a glass bar into the echo, pitched by its catalog number. Expect one every minute or so.
-- *Crew gong:* while the ISS or Tiangong is above the horizon, a gong every two bars, louder the higher it is.
+- *Crew gong:* while the ISS or Tiangong is above the horizon, a gong every four bars, louder the higher it is.
 
 **Tempo** is the period of the low orbits overhead, thirteen octaves up. A 95.6-minute Starlink orbit is 1/5736 Hz; × 2¹³ that's 85.7 BPM, a relaxed dub tempo. Higher shells are a little slower. You can also set it by hand, or follow Aether. Swing defaults to 10%.
 
@@ -61,7 +63,7 @@ Needs a Mac with Xcode 16 or newer (Xcode 26 for iOS 26).
 - `Catalog.swift`: families, CelesTrak fetch and cache, the simulated sky
 - `SkyTracker.swift`: background propagation, snapshots of what's above the horizon
 - `RhythmModel.swift`: adaptive cones, Euclidean patterns, pitches, pings, gong, tempo, link, settings
-- `OrbitDSP.swift`: audio-thread sequencer with trig probability; the synthesized kit (a modal drum voice: three decaying partials, a pitch sweep and filtered noise; a four-saw stab voice); the dub echo and dust
+- `OrbitDSP.swift`: audio-thread sequencer with trig probability; the synthesized kit (one modal voice: three decaying partials, a pitch sweep and filtered noise); the dub echo and dust
 - `OrbitEngine.swift`: dry bus (drums and echoes) plus a send into a plate reverb
 - `DomeView.swift`: the sky dome and the step rows
 - `OrbitaktApp.swift`: app, main screen, settings

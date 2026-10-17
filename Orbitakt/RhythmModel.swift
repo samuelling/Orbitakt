@@ -45,9 +45,9 @@ enum TempoSource: String, CaseIterable, Identifiable {
 /// into a Euclidean pattern, and drives the engine and the link with the other apps.
 @MainActor
 final class RhythmModel: NSObject, ObservableObject {
-    /// Sparse on purpose: four kicks a bar when four navigation satellites are up (a dub
-    /// four-on-the-floor), two rimshots thrown into the echo, a few hats, and a chord stab that
-    /// comes round twice every twelve steps against the four-four.
+    /// Sparse on purpose: four kicks a cycle when four navigation satellites are up, two
+    /// rimshots thrown into the echo, a few hats, and a breath of air that comes round twice
+    /// every twelve steps against the sixteen. Steps are eighths by default (half-time).
     static let specs: [TrackSpec] = [
         TrackSpec(family: .nav, sound: "kick", color: Color(red: 1.0, green: 0.55, blue: 0.25),
                   defaultSteps: 16, fill: 4.0 / 16),
@@ -55,7 +55,7 @@ final class RhythmModel: NSObject, ObservableObject {
                   defaultSteps: 16, fill: 2.0 / 16),
         TrackSpec(family: .swarm, sound: "hat", color: Color(red: 0.45, green: 0.75, blue: 1.0),
                   defaultSteps: 16, fill: 5.0 / 16),
-        TrackSpec(family: .belt, sound: "stab", color: Color(red: 0.85, green: 0.6, blue: 1.0),
+        TrackSpec(family: .belt, sound: "swish", color: Color(red: 0.85, green: 0.6, blue: 1.0),
                   defaultSteps: 12, fill: 2.0 / 12),
     ]
     static let crewColor = Color(red: 1.0, green: 0.85, blue: 0.4)
@@ -83,6 +83,8 @@ final class RhythmModel: NSObject, ObservableObject {
     /// Echo feedback, 0…0.85.
     @Published var dub = 0.55 { didSet { save(); engine.params[.dub] = Float(dub) } }
     @Published var dustOn = true { didSet { save() } }
+    /// Steps per beat: 2 (eighths, the default, half-time and unhurried) or 4 (sixteenths).
+    @Published var division = 2 { didSet { save(); engine.params[.division] = Float(division) } }
     /// 0…1: how far the echo send is thrown open right now (decays over a few seconds).
     @Published private(set) var throwLevel = 0.0
     @Published var pingRadius = 4.0 { didSet { save() } }           // degrees from the zenith
@@ -138,6 +140,7 @@ final class RhythmModel: NSObject, ObservableObject {
         let p = engine.params
         p[.swing] = Float(swing)
         p[.dub] = Float(dub)
+        p[.division] = Float(division)
         for (i, t) in tracks.enumerated() {
             p.pLen[i] = Float(t.steps)
             p.mute[i] = t.muted ? 1 : 0
@@ -372,20 +375,11 @@ final class RhythmModel: NSObject, ObservableObject {
             p.pVel[i] = Float(t == 0 ? 0.55 + 0.35 * height : 0.35 + 0.65 * height)
             p.pPan[i] = Float(max(-0.9, min(0.9, sin(az) * cos(el * .pi / 180) * 1.1)))
             p.pFreq[i] = Float(pitch(track: t, blip: b, root: root, scale: sc))
-            if t == 3 {
-                let d = stabDegree(b, sc)
-                let base = semis(d, sc)
-                p.pC1[i] = Float(pow(2, Double(semis(d + 2, sc) - base) / 12))
-                p.pC2[i] = Float(pow(2, Double(semis(d + 4, sc) - base) / 12))
-                p.pC3[i] = Float(pow(2, Double(semis(d + (sc.count >= 7 ? 6 : 5), sc) - base) / 12))
-            }
         }
         p.pLen[t] = Float(n)
         switch t {
         case 2:   // hats brighten with a busier Starlink sky
             p.bright[t] = Float(clamp01(Double(fam.count) / 450))
-        case 3:   // the chord opens a little in daylight, when Bellweathered can tell us
-            p.bright[t] = Float(0.35 + 0.4 * (leads["bellweather"]?.state.day ?? 0.4))
         default:
             p.bright[t] = 0.5
         }
@@ -415,17 +409,13 @@ final class RhythmModel: NSObject, ObservableObject {
             return mtof(Double(81 + root + semis(2, sc)))
         case 2:   // hat partials sit in a fixed metallic band
             return 5400
-        case 3:   // the stab's chord root, from where the satellite sits along the belt
-            return mtof(Double(48 + root + semis(stabDegree(b, sc), sc)))
+        case 3:   // the swish's colour, from where the satellite sits along the belt:
+                  // a dark breath in the east (≈ 700 Hz) to an airy one in the west (≈ 4.5 kHz)
+            let x = clamp01((1 - sin(Double(b.az) * .pi / 180)) / 2)   // east 0 … west 1
+            return 700 * pow(2, 2.7 * x)
         default:
             return 1000
         }
-    }
-
-    /// The belt is strung across your sky like a keyboard: east is the root, west an octave up.
-    private func stabDegree(_ b: Blip, _ sc: [Int]) -> Int {
-        let x = clamp01((1 - sin(Double(b.az) * .pi / 180)) / 2)   // east 0 … west 1
-        return Int((x * Double(sc.count - 1)).rounded())
     }
 
     /// Throw the echo send open (a dub move); it falls back over a few seconds.
@@ -460,7 +450,7 @@ final class RhythmModel: NSObject, ObservableObject {
         pings.append((Double(b.az), Double(b.el), now))
     }
 
-    /// While a crewed station is up, a gong every two bars; and one as it rises.
+    /// While a crewed station is up, a gong every four bars; and one as it rises.
     private func crew(_ s: SkySnapshot) {
         let up = s.blips.filter { $0.family == .crew && $0.el > 5 }
         let ids = Set(up.map(\.id))
@@ -475,7 +465,7 @@ final class RhythmModel: NSObject, ObservableObject {
             crewNote = nil
         }
         guard isPlaying, gongOn, crewUp else { return }
-        let bar = Int(engine.params[.globalStep]) / 32
+        let bar = Int(engine.params[.globalStep]) / (4 * 4 * division)
         if rising || bar != lastGongBar {
             lastGongBar = bar
             let p = engine.params
@@ -586,6 +576,7 @@ final class RhythmModel: NSObject, ObservableObject {
         d.set(space, forKey: "o2.space")
         d.set(dub, forKey: "o2.dub")
         d.set(dustOn, forKey: "o2.dust")
+        d.set(division, forKey: "o2.div")
         d.set(pingRadius, forKey: "o.ping")
         d.set(gongOn, forKey: "o.gong")
         d.set(followTempo, forKey: "o.followTempo")
@@ -608,6 +599,7 @@ final class RhythmModel: NSObject, ObservableObject {
         if d.object(forKey: "o2.space") != nil { space = d.double(forKey: "o2.space") }
         if d.object(forKey: "o2.dub") != nil { dub = min(0.85, max(0, d.double(forKey: "o2.dub"))) }
         if d.object(forKey: "o2.dust") != nil { dustOn = d.bool(forKey: "o2.dust") }
+        if d.object(forKey: "o2.div") != nil { division = d.integer(forKey: "o2.div") == 4 ? 4 : 2 }
         if d.object(forKey: "o.ping") != nil { pingRadius = d.double(forKey: "o.ping") }
         if d.object(forKey: "o.gong") != nil { gongOn = d.bool(forKey: "o.gong") }
         if d.object(forKey: "o.followTempo") != nil { followTempo = d.bool(forKey: "o.followTempo") }
