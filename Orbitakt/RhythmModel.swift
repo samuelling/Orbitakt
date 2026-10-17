@@ -5,32 +5,27 @@ import SwiftUI
 @inline(__always) func mtof(_ m: Double) -> Double { 440 * pow(2, (m - 69) / 12) }
 @inline(__always) func clamp01(_ x: Double) -> Double { min(1, max(0, x)) }
 
-/// A Euclidean rhythm E(k, n): k hits spread as evenly as possible over n steps, the first on
-/// step 0. (The same patterns as Bjorklund's algorithm, up to rotation.)
-func euclid(_ k: Int, _ n: Int) -> [Bool] {
-    guard n > 0 else { return [] }
-    let k = max(0, min(n, k))
-    return (0..<n).map { k > 0 && ($0 * k) % n < k }
-}
-
-/// One of the four Euclidean tracks: a family of satellites, a cone of sky around the zenith,
-/// and a drum.
+/// One of the four tracks: a family of satellites, a cone of sky around the zenith, and a drum.
 struct TrackSpec {
     let family: Family
     let sound: String
     let color: Color
-    let defaultSteps: Int
-    /// The cone opens until it holds about this fraction of the steps.
-    let fill: Double
+    /// On average the cone holds about this many (it adapts over ten minutes, so a busy or
+    /// empty spell still comes through as more or fewer hits).
+    let target: Int
+}
+
+/// One satellite on the radar, as a track plays it.
+struct RadarHit: Equatable {
+    let id: Int32
+    let phase: Double            // its bearing / 360° (0 = north, clockwise)
+    let vel: Double
 }
 
 struct TrackState: Equatable {
-    var steps = 16
-    var k = 0
-    var rotation = 0
-    var hits: [Bool] = []
+    var hits: [RadarHit] = []    // the satellites in the cone this sweep (at most 32)
     var cone = 30.0              // half-angle from the zenith, degrees
-    var inCone = 0               // satellites inside (can exceed steps)
+    var inCone = 0
     var auto = true
     var muted = false
 }
@@ -41,28 +36,22 @@ enum TempoSource: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-/// Orbitakt's brain: keeps the catalog, reads the snapshots, turns each family's cone of sky
-/// into a Euclidean pattern, and drives the engine and the link with the other apps.
+/// Orbitakt's brain: keeps the catalog, reads the snapshots, puts every satellite in each
+/// family's cone on the radar at its real bearing, and drives the engine and the link.
 @MainActor
 final class RhythmModel: NSObject, ObservableObject {
-    /// Sparse on purpose: four kicks a cycle when four navigation satellites are up, two
-    /// rimshots thrown into the echo, a few hats, and a breath of air that comes round twice
-    /// every twelve steps against the sixteen. Steps are eighths by default (half-time).
+    /// Sparse on purpose: about four kicks, two rimshots, five hats and two swishes a sweep.
     static let specs: [TrackSpec] = [
-        TrackSpec(family: .nav, sound: "kick", color: Color(red: 1.0, green: 0.55, blue: 0.25),
-                  defaultSteps: 16, fill: 4.0 / 16),
-        TrackSpec(family: .leo, sound: "rim", color: Color(red: 0.45, green: 0.85, blue: 0.55),
-                  defaultSteps: 16, fill: 2.0 / 16),
-        TrackSpec(family: .swarm, sound: "hat", color: Color(red: 0.45, green: 0.75, blue: 1.0),
-                  defaultSteps: 16, fill: 5.0 / 16),
-        TrackSpec(family: .belt, sound: "swish", color: Color(red: 0.85, green: 0.6, blue: 1.0),
-                  defaultSteps: 12, fill: 2.0 / 12),
+        TrackSpec(family: .nav, sound: "kick", color: Color(red: 1.0, green: 0.55, blue: 0.25), target: 4),
+        TrackSpec(family: .leo, sound: "rim", color: Color(red: 0.45, green: 0.85, blue: 0.55), target: 2),
+        TrackSpec(family: .swarm, sound: "hat", color: Color(red: 0.45, green: 0.75, blue: 1.0), target: 5),
+        TrackSpec(family: .belt, sound: "swish", color: Color(red: 0.85, green: 0.6, blue: 1.0), target: 2),
     ]
     static let crewColor = Color(red: 1.0, green: 0.85, blue: 0.4)
 
     // What the sky is doing
     @Published private(set) var snapshot = SkySnapshot()
-    @Published private(set) var tracks: [TrackState] = RhythmModel.specs.map { TrackState(steps: $0.defaultSteps) }
+    @Published private(set) var tracks: [TrackState] = RhythmModel.specs.map { _ in TrackState() }
     @Published private(set) var isPlaying = false
     @Published private(set) var status = "Reading the sky…"
     @Published private(set) var dataNote = ""
@@ -83,8 +72,10 @@ final class RhythmModel: NSObject, ObservableObject {
     /// Echo feedback, 0…0.85.
     @Published var dub = 0.55 { didSet { save(); engine.params[.dub] = Float(dub) } }
     @Published var dustOn = true { didSet { save() } }
-    /// Steps per beat: 2 (eighths, the default, half-time and unhurried) or 4 (sixteenths).
+    /// 2: the beam goes round once every two bars (grid of eighths, unhurried); 4: once a bar.
     @Published var division = 2 { didSet { save(); engine.params[.division] = Float(division) } }
+    /// 0 = every hit exactly at its satellite's bearing … 1 = snapped to the grid.
+    @Published var quantize = 0.5 { didSet { save(); engine.params[.quantize] = Float(quantize) } }
     /// 0…1: how far the echo send is thrown open right now (decays over a few seconds).
     @Published private(set) var throwLevel = 0.0
     @Published var pingRadius = 4.0 { didSet { save() } }           // degrees from the zenith
@@ -118,7 +109,6 @@ final class RhythmModel: NSObject, ObservableObject {
     private struct Run {
         var cone = -1.0
         var ids: Set<Int32> = []
-        var newestAz = -1.0
         var manualCone: Double?
     }
     private var runs: [Run] = RhythmModel.specs.map { _ in Run() }
@@ -141,10 +131,8 @@ final class RhythmModel: NSObject, ObservableObject {
         p[.swing] = Float(swing)
         p[.dub] = Float(dub)
         p[.division] = Float(division)
-        for (i, t) in tracks.enumerated() {
-            p.pLen[i] = Float(t.steps)
-            p.mute[i] = t.muted ? 1 : 0
-        }
+        p[.quantize] = Float(quantize)
+        for (i, t) in tracks.enumerated() { p.mute[i] = t.muted ? 1 : 0 }
         engine.setSpace(space)
 
         tracker.onSnapshot = { [weak self] s in MainActor.assumeIsolated { self?.process(s) } }
@@ -198,13 +186,6 @@ final class RhythmModel: NSObject, ObservableObject {
         }
     }
 
-    func setSteps(_ n: Int, track t: Int) {
-        guard tracks.indices.contains(t) else { return }
-        tracks[t].steps = max(3, min(OrbitParams.maxSteps, n))
-        save()
-        if snapshot.time > 0 { build(track: t, snapshot: snapshot, dt: 0) }
-    }
-
     func setMuted(_ m: Bool, track t: Int) {
         guard tracks.indices.contains(t) else { return }
         tracks[t].muted = m
@@ -222,9 +203,18 @@ final class RhythmModel: NSObject, ObservableObject {
         if snapshot.time > 0 { build(track: t, snapshot: snapshot, dt: 0) }
     }
 
-    /// The step each track just played (read by the views every frame, straight from the engine).
-    func playhead(_ t: Int) -> Int { Int(engine.params.curStep[t]) }
-    func hitCount(_ t: Int) -> Int { Int(engine.params.hitCount[t]) }
+    /// Where the beam is, 0…1 from north clockwise (read by the views every frame).
+    var sweepPhase: Double { Double(engine.params[.sweep]) }
+
+    /// When a hit fires within the sweep, matching the engine: its bearing pulled toward the
+    /// nearest of 16 grid slots by Quantize, odd slots a little late with swing.
+    func firePhase(_ bearingPhase: Double) -> Double {
+        let g = Double(OrbitParams.gridSlots)
+        let slot = (bearingPhase * g).rounded()
+        let grid = (slot + (Int(slot) % 2 == 1 ? min(0.4, swing) : 0)) / g
+        let f = bearingPhase + quantize * (grid - bearingPhase)
+        return f >= 1 ? f - 1 : f
+    }
 
     // MARK: Catalog
 
@@ -302,81 +292,55 @@ final class RhythmModel: NSObject, ObservableObject {
 
     private func build(track t: Int, snapshot s: SkySnapshot, dt: Double) {
         let spec = RhythmModel.specs[t]
-        let n = tracks[t].steps
         let fam = s.blips.filter { $0.family == spec.family }
         var run = runs[t]
 
-        // The cone: adaptive, like contrast gain control. It settles where it holds about
-        // `fill · n` satellites on average (the slow mean is divided out) while the
-        // moment-to-moment comings and goings pass straight through.
+        // The cone: it adapts slowly (ten minutes) to hold about `target` satellites on
+        // average, so the difference between, say, Starlink's hundreds and GPS's dozen is
+        // divided out, while a busy or empty spell still comes through as more or fewer hits.
         if let m = run.manualCone {
             run.cone = m
         } else {
-            let want = max(1, Int((spec.fill * Double(n)).rounded()))
             let zs = fam.map { Double($0.zenith) }.sorted()
-            let target = zs.count >= want ? min(90, zs[want - 1] + 0.1) : 90
+            let target = zs.count >= spec.target ? min(90, zs[spec.target - 1] + 0.1) : 90
             if run.cone < 0 {
                 run.cone = target
             } else if dt > 0 {
-                run.cone += (target - run.cone) * (1 - exp(-dt / 60))
+                run.cone += (target - run.cone) * (1 - exp(-dt / 600))
             }
         }
         let cone = max(1, run.cone)
-        let members = fam.filter { Double($0.zenith) <= cone }
+        var members = fam.filter { Double($0.zenith) <= cone }
         let ids = Set(members.map(\.id))
-        // Newest arrival sets where the bar starts: the pattern turns to face it.
-        if let arrival = members.filter({ !run.ids.contains($0.id) }).max(by: { $0.el < $1.el }),
-           !run.ids.isEmpty || run.newestAz < 0 {
-            run.newestAz = Double(arrival.az)
-            // A low-orbit satellite crossing into its cone throws the echo send open
-            if t == 1 && !run.ids.isEmpty && dt > 0 { throwEcho(0.55 + 0.45 * Double.random(in: 0...1)) }
+        // A low-orbit satellite crossing into its cone throws the echo send open
+        if t == 1 && dt > 0 && !run.ids.isEmpty && !ids.subtracting(run.ids).isEmpty {
+            throwEcho(0.55 + 0.45 * Double.random(in: 0...1))
         }
-        if run.newestAz < 0, let top = members.max(by: { $0.el < $1.el }) { run.newestAz = Double(top.az) }
         run.ids = ids
         runs[t] = run
 
-        // If the cone holds more than n, the n highest play.
-        var chosen = members
-        if chosen.count > n { chosen = Array(chosen.sorted { $0.el > $1.el }.prefix(n)) }
-        let k = chosen.count
-        let origin = max(0, run.newestAz)
-        chosen.sort { fmod(Double($0.az) - origin + 360, 360) < fmod(Double($1.az) - origin + 360, 360) }
-        let rot = Int((origin / 360 * Double(n)).rounded()) % n
-        let base = euclid(k, n)
-        var hits = [Bool](repeating: false, count: n)
-        for st in 0..<n { hits[st] = base[(st - rot + n) % n] }
-
-        // Write the pattern: the playhead sweeps the sky clockwise from north once per bar,
-        // so the j-th hit after the rotation point plays the j-th satellite clockwise from
-        // the newest arrival. Its height sets velocity; east–west sets pan.
+        // Every satellite in the cone hits once a sweep, as the beam passes its bearing.
+        // (If a hand-set cone holds more than 32, the highest 32 play.)
+        let E = OrbitParams.maxEvents
+        if members.count > E { members = Array(members.sorted { $0.el > $1.el }.prefix(E)) }
+        members.sort { $0.az < $1.az }
         let p = engine.params
-        let S = OrbitParams.maxSteps
         let root = rootPC
         let sc = steps
-        var j = 0
-        for off in 0..<n {
-            let st = (rot + off) % n
-            let i = t * S + st
-            p.pHit[i] = 0
-            guard hits[st], j < chosen.count else { continue }
-            let b = chosen[j]
-            j += 1
-            let el = Double(b.el), az = Double(b.az) * .pi / 180
+        var hits: [RadarHit] = []
+        hits.reserveCapacity(members.count)
+        for (e, b) in members.enumerated() {
+            let i = t * E + e
+            let el = Double(b.el), az = Double(b.az)
             let height = clamp01((el - (90 - cone)) / max(1, cone))   // 0 at the cone's rim, 1 at the zenith
-            // Machinedrum-style trig probability: high satellites always play, the ones near the
-            // rim of the cone flicker in and out. The kick stays steady.
-            let prob: Double
-            switch t {
-            case 0: prob = 1
-            case 3: prob = 0.7 + 0.3 * height
-            default: prob = 0.45 + 0.55 * height
-            }
-            p.pHit[i] = Float(prob)
-            p.pVel[i] = Float(t == 0 ? 0.55 + 0.35 * height : 0.35 + 0.65 * height)
-            p.pPan[i] = Float(max(-0.9, min(0.9, sin(az) * cos(el * .pi / 180) * 1.1)))
+            let v = t == 0 ? 0.55 + 0.35 * height : 0.35 + 0.65 * height
+            p.ePhase[i] = Float(az / 360)
+            p.pVel[i] = Float(v)
+            p.pPan[i] = Float(max(-0.9, min(0.9, sin(az * .pi / 180) * cos(el * .pi / 180) * 1.1)))
             p.pFreq[i] = Float(pitch(track: t, blip: b, root: root, scale: sc))
+            hits.append(RadarHit(id: b.id, phase: az / 360, vel: v))
         }
-        p.pLen[t] = Float(n)
+        p.eCount[t] = Float(members.count)
         switch t {
         case 2:   // hats brighten with a busier Starlink sky
             p.bright[t] = Float(clamp01(Double(fam.count) / 450))
@@ -386,8 +350,6 @@ final class RhythmModel: NSObject, ObservableObject {
         p.pGen[t] += 1
 
         var v = tracks[t]
-        v.k = k
-        v.rotation = rot
         v.hits = hits
         v.cone = cone
         v.inCone = members.count
@@ -465,7 +427,7 @@ final class RhythmModel: NSObject, ObservableObject {
             crewNote = nil
         }
         guard isPlaying, gongOn, crewUp else { return }
-        let bar = Int(engine.params[.globalStep]) / (4 * 4 * division)
+        let bar = Int(engine.params[.beats] / 16)
         if rising || bar != lastGongBar {
             lastGongBar = bar
             let p = engine.params
@@ -577,11 +539,11 @@ final class RhythmModel: NSObject, ObservableObject {
         d.set(dub, forKey: "o2.dub")
         d.set(dustOn, forKey: "o2.dust")
         d.set(division, forKey: "o2.div")
+        d.set(quantize, forKey: "o3.quantize")
         d.set(pingRadius, forKey: "o.ping")
         d.set(gongOn, forKey: "o.gong")
         d.set(followTempo, forKey: "o.followTempo")
         d.set(followKey, forKey: "o.followKey")
-        d.set(tracks.map(\.steps), forKey: "o2.steps")
         d.set(tracks.map(\.muted), forKey: "o.mutes")
         d.set(runs.map { $0.manualCone ?? -1 }, forKey: "o2.cones")
     }
@@ -600,13 +562,11 @@ final class RhythmModel: NSObject, ObservableObject {
         if d.object(forKey: "o2.dub") != nil { dub = min(0.85, max(0, d.double(forKey: "o2.dub"))) }
         if d.object(forKey: "o2.dust") != nil { dustOn = d.bool(forKey: "o2.dust") }
         if d.object(forKey: "o2.div") != nil { division = d.integer(forKey: "o2.div") == 4 ? 4 : 2 }
+        if d.object(forKey: "o3.quantize") != nil { quantize = clamp01(d.double(forKey: "o3.quantize")) }
         if d.object(forKey: "o.ping") != nil { pingRadius = d.double(forKey: "o.ping") }
         if d.object(forKey: "o.gong") != nil { gongOn = d.bool(forKey: "o.gong") }
         if d.object(forKey: "o.followTempo") != nil { followTempo = d.bool(forKey: "o.followTempo") }
         if d.object(forKey: "o.followKey") != nil { followKey = d.bool(forKey: "o.followKey") }
-        if let s = d.array(forKey: "o2.steps") as? [Int], s.count == tracks.count {
-            for i in s.indices { tracks[i].steps = max(3, min(OrbitParams.maxSteps, s[i])) }
-        }
         if let m = d.array(forKey: "o.mutes") as? [Bool], m.count == tracks.count {
             for i in m.indices { tracks[i].muted = m[i] }
         }

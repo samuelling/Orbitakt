@@ -166,11 +166,21 @@ private struct OrbitSettingsView: View {
                         Text(String(format: "Orbit tempo: %.1f BPM", model.orbitBPM))
                             .foregroundStyle(.secondary)
                     }
-                    Picker("Steps", selection: $model.division) {
-                        Text("Eighths").tag(2)
-                        Text("Sixteenths").tag(4)
+                    Picker("Sweep", selection: $model.division) {
+                        Text("Every 2 bars").tag(2)
+                        Text("Every bar").tag(4)
                     }
                     .pickerStyle(.segmented)
+                    VStack(alignment: .leading) {
+                        HStack {
+                            Text("Literal")
+                            Spacer()
+                            Text(String(format: "Quantize %.0f%%", model.quantize * 100)).foregroundStyle(.secondary)
+                            Spacer()
+                            Text("Grid")
+                        }
+                        Slider(value: $model.quantize, in: 0...1)
+                    }
                     VStack(alignment: .leading) {
                         Text(String(format: "Swing: %.0f%%", model.swing * 100))
                         Slider(value: $model.swing, in: 0...0.3)
@@ -178,7 +188,7 @@ private struct OrbitSettingsView: View {
                 } header: {
                     Text("Music")
                 } footer: {
-                    Text("Orbit tempo is the period of the low orbits overhead, thirteen octaves up: a 95-minute orbit × 2¹³ ≈ 86 BPM. Steps are eighths by default, so each pattern spans two bars and the groove sits in half-time; sixteenths double the pace.")
+                    Text("Orbit tempo is the period of the low orbits overhead, thirteen octaves up: a 95-minute orbit × 2¹³ ≈ 86 BPM. The beam goes round your sky once per sweep, starting at north, and every satellite in a cone plays as the beam passes it. Literal plays each one exactly at its bearing; Grid snaps them to 16 slots per sweep (eighths when a sweep is two bars). Swing applies to the grid.")
                 }
 
                 Section {
@@ -224,9 +234,6 @@ private struct TrackSettings: View {
         let spec = RhythmModel.specs[index]
         let t = model.tracks[index]
         Section {
-            Stepper("Steps: \(t.steps)", value: Binding(get: { t.steps },
-                                                        set: { model.setSteps($0, track: index) }),
-                    in: 3...OrbitParams.maxSteps)
             Toggle("Adaptive cone", isOn: Binding(get: { t.auto },
                                                   set: { model.setCone($0 ? nil : t.cone, track: index) }))
             VStack(alignment: .leading) {
@@ -246,10 +253,10 @@ private struct TrackSettings: View {
 
     private func footer(_ f: Family) -> String {
         switch f {
-        case .nav: return "GPS, Galileo, GLONASS and BeiDou, 20,000 km up. The cone holds about four, so with four up it's a steady half-time pulse; three or five bend it. They cross the sky in hours, so the kick changes slowly. A deep kick on the root."
-        case .leo: return "Low orbits other than Starlink: OneWeb, Iridium, weather and science satellites. About two in the cone; each crosses the sky in roughly ten minutes. A tuned rimshot, mostly into the echo, and each new arrival throws the echo open."
-        case .swarm: return "Starlink. Thousands of them, so the cone is narrow and the pattern turns over every few seconds. Metallic hats that brighten as more of the swarm is up; the ones near the cone's rim only sometimes play."
-        case .belt: return "The geostationary belt: a fixed arc across your sky, to the south in the northern hemisphere. It never moves, so this pattern is your location's fingerprint. A soft breath of air with no pitch: darker for satellites in the east, airier toward the west. It drifts twelve against sixteen."
+        case .nav: return "GPS, Galileo, GLONASS and BeiDou, 20,000 km up. The cone holds about four on average; each kicks as the beam passes its bearing. They cross the sky in hours, so the kick pattern shifts slowly. A deep kick on the root."
+        case .leo: return "Low orbits other than Starlink: OneWeb, Iridium, weather and science satellites. About two in the cone; each crosses the sky in roughly ten minutes, so you hear its hit slide through the sweep. A tuned rimshot, mostly into the echo, and each new arrival throws the echo open."
+        case .swarm: return "Starlink. Thousands of them, so the cone is narrow and hats drift, flam and merge as satellites cross. Metallic hats that brighten as more of the swarm is up; higher ones play louder."
+        case .belt: return "The geostationary belt: a fixed arc across your sky, to the south in the northern hemisphere. It never moves, so these hits stay put: your location's fingerprint. A soft breath of air with no pitch: darker for satellites in the east, airier toward the west."
         default: return ""
         }
     }

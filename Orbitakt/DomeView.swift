@@ -3,7 +3,8 @@ import SwiftUI
 /// The sky above you, seen from above like a map: zenith in the middle, horizon at the rim,
 /// north up and east to the right. Every satellite above the horizon is a dot in its
 /// family's colour; each track's cone is a ring around the zenith, and the dots inside a
-/// cone (the ones playing) are lit. A sweep line goes round once per bar of the NAV track.
+/// cone are lit. The radar beam is the playhead: each lit dot flashes as the beam reaches it,
+/// at the moment it plays.
 struct DomeView: View {
     @ObservedObject var model: RhythmModel
 
@@ -71,16 +72,20 @@ struct DomeView: View {
                        style: StrokeStyle(lineWidth: 1, dash: t.auto ? [] : [3, 3]))
         }
 
-        // The sweep: once round per NAV bar, from north, clockwise
-        if model.isPlaying, let nav = model.tracks.first, nav.steps > 0 {
-            let frac = (Double(model.playhead(0)) + 0.5) / Double(nav.steps)
-            let a = frac * 2 * .pi
-            var beam = Path()
-            beam.move(to: c)
-            beam.addArc(center: c, radius: R, startAngle: .radians(a - .pi / 2 - 0.35),
-                        endAngle: .radians(a - .pi / 2), clockwise: false)
-            beam.closeSubpath()
-            ctx.fill(beam, with: .color(.white.opacity(0.04)))
+        // The beam: the playhead itself, from north, clockwise
+        let sweep = model.sweepPhase
+        if model.isPlaying {
+            let a = sweep * 2 * .pi
+            var trail = Path()
+            trail.move(to: c)
+            trail.addArc(center: c, radius: R, startAngle: .radians(a - .pi / 2 - 0.5),
+                         endAngle: .radians(a - .pi / 2), clockwise: false)
+            trail.closeSubpath()
+            ctx.fill(trail, with: .color(.white.opacity(0.035)))
+            var line = Path()
+            line.move(to: c)
+            line.addLine(to: CGPoint(x: c.x + R * CGFloat(sin(a)), y: c.y - R * CGFloat(cos(a))))
+            ctx.stroke(line, with: .color(.white.opacity(0.35)), lineWidth: 1)
         }
 
         // Satellites
@@ -100,9 +105,16 @@ struct DomeView: View {
             default:
                 let r: CGFloat = b.family == .swarm ? 1.1 : 1.6
                 if lit {
-                    ctx.fill(circle(p, r * 3), with: .radialGradient(Gradient(colors: [col.opacity(0.5), .clear]),
-                                                                   center: p, startRadius: 0, endRadius: r * 3))
-                    ctx.fill(circle(p, r + 0.6), with: .color(col))
+                    // Flash as the beam passes (fading over ~5% of a revolution)
+                    var flash = 0.0
+                    if model.isPlaying && !model.tracks[ti].muted {
+                        let since = (sweep - model.firePhase(Double(b.az) / 360) + 1).truncatingRemainder(dividingBy: 1)
+                        if since < 0.05 { flash = 1 - since / 0.05 }
+                    }
+                    let gr = r * (3 + 4 * CGFloat(flash))
+                    ctx.fill(circle(p, gr), with: .radialGradient(Gradient(colors: [col.opacity(0.5 + 0.4 * flash), .clear]),
+                                                                center: p, startRadius: 0, endRadius: gr))
+                    ctx.fill(circle(p, r + 0.6 + 1.6 * CGFloat(flash)), with: .color(col))
                 } else {
                     ctx.fill(circle(p, r), with: .color(col.opacity(0.4)))
                 }
@@ -123,7 +135,9 @@ struct DomeView: View {
     }
 }
 
-/// One Euclidean track: name, E(k, n) and rotation, and a row of steps with the playhead.
+/// One track's radar line: each satellite in its cone is a dot at the point in the sweep where
+/// it plays (its bearing, pulled toward the grid by Quantize), sized by how high it is. The
+/// playhead is the beam; dots flash as it passes.
 struct TrackRow: View {
     @ObservedObject var model: RhythmModel
     let index: Int
@@ -137,38 +151,58 @@ struct TrackRow: View {
                     Text(spec.family.label)
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
                         .foregroundStyle(t.muted ? Color.white.opacity(0.3) : spec.color)
-                    Text("E(\(t.k),\(t.steps))+\(t.rotation)")
+                    Text("\(t.hits.count) \(spec.sound)")
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(.white.opacity(t.muted ? 0.25 : 0.6))
                 }
                 .frame(width: 74, alignment: .leading)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("\(spec.family.label) \(spec.sound), \(t.k) of \(t.steps) steps\(t.muted ? ", muted" : "")")
+            .accessibilityLabel("\(spec.family.label) \(spec.sound), \(t.hits.count) satellites\(t.muted ? ", muted" : "")")
             .accessibilityHint("Double tap to \(t.muted ? "unmute" : "mute")")
 
             TimelineView(.animation) { _ in
-                let head = model.isPlaying ? model.playhead(index) : -1
+                let sweep = model.sweepPhase
+                let playing = model.isPlaying
                 Canvas { ctx, size in
-                    let n = max(1, t.steps)
-                    let w = size.width / CGFloat(n)
-                    let d = min(w - 3, size.height - 4, 13)
-                    for s in 0..<n {
-                        let x = w * (CGFloat(s) + 0.5), y = size.height / 2
-                        let rect = CGRect(x: x - d / 2, y: y - d / 2, width: d, height: d)
-                        let path = Path(roundedRect: rect, cornerRadius: d * 0.3)
-                        let on = s < t.hits.count && t.hits[s]
-                        let isHead = s == head
-                        if on {
-                            ctx.fill(path, with: .color(spec.color.opacity(t.muted ? 0.2 : (isHead ? 1 : 0.65))))
-                        } else {
-                            ctx.stroke(path, with: .color(.white.opacity(isHead ? 0.6 : 0.14)), lineWidth: 1)
+                    let w = size.width, y = size.height / 2
+                    // Grid: 16 slots, beats stronger
+                    for s in 0...OrbitParams.gridSlots {
+                        let x = w * CGFloat(s) / CGFloat(OrbitParams.gridSlots)
+                        var tick = Path()
+                        let h: CGFloat = s % 4 == 0 ? 7 : 3
+                        tick.move(to: CGPoint(x: x, y: y - h))
+                        tick.addLine(to: CGPoint(x: x, y: y + h))
+                        ctx.stroke(tick, with: .color(.white.opacity(s % 4 == 0 ? 0.18 : 0.08)), lineWidth: 1)
+                    }
+                    var base = Path()
+                    base.move(to: CGPoint(x: 0, y: y))
+                    base.addLine(to: CGPoint(x: w, y: y))
+                    ctx.stroke(base, with: .color(.white.opacity(0.08)), lineWidth: 1)
+                    for h in t.hits {
+                        let f = model.firePhase(h.phase)
+                        let x = w * CGFloat(f)
+                        var flash = 0.0
+                        if playing && !t.muted {
+                            let since = (sweep - f + 1).truncatingRemainder(dividingBy: 1)
+                            if since < 0.04 { flash = 1 - since / 0.04 }
                         }
-                        if isHead && on && !t.muted {
-                            ctx.fill(Path(ellipseIn: rect.insetBy(dx: -d * 0.35, dy: -d * 0.35)),
-                                     with: .radialGradient(Gradient(colors: [spec.color.opacity(0.45), .clear]),
-                                                           center: CGPoint(x: x, y: y), startRadius: 0, endRadius: d))
+                        let r = 2.5 + 3 * CGFloat(h.vel) + 3 * CGFloat(flash)
+                        let pt = CGPoint(x: x, y: y)
+                        if flash > 0 {
+                            ctx.fill(Path(ellipseIn: CGRect(x: x - r * 2, y: y - r * 2, width: r * 4, height: r * 4)),
+                                     with: .radialGradient(Gradient(colors: [spec.color.opacity(0.5 * flash), .clear]),
+                                                           center: pt, startRadius: 0, endRadius: r * 2))
                         }
+                        ctx.fill(Path(ellipseIn: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2)),
+                                 with: .color(spec.color.opacity(t.muted ? 0.2 : 0.55 + 0.45 * flash)))
+                    }
+                    if playing {
+                        var head = Path()
+                        let x = w * CGFloat(sweep)
+                        head.move(to: CGPoint(x: x, y: 1))
+                        head.addLine(to: CGPoint(x: x, y: size.height - 1))
+                        ctx.stroke(head, with: .color(.white.opacity(0.5)), lineWidth: 1)
                     }
                 }
             }

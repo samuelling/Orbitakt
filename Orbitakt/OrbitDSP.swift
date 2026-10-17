@@ -3,32 +3,37 @@ import Foundation
 /// Control surface between the main thread and the audio thread. Plain Float stores, no
 /// locks, no allocation on the audio thread (the same scheme as Aether and Bellweathered).
 ///
-/// Patterns are written into a *pending* slot per track; the audio thread adopts a track's
-/// pending pattern only when that track wraps to step 1, so changes always land on its bar line.
+/// Each track's pending list of satellites (one event each, at the satellite's bearing as a
+/// phase of the sweep) is adopted by the audio thread when the sweep passes north, so the sky
+/// is re-read once per revolution and every hit lands where its satellite was at that moment.
 final class OrbitParams {
     static let tracks = 4
-    static let maxSteps = 32
+    static let maxEvents = 32
     static let pingSlots = 4
+    /// The grid hits snap toward when quantized: 16 slots per sweep.
+    static let gridSlots = 16
 
     enum G: Int, CaseIterable {
         case master, run, bpm, swing
-        case division       // steps per beat: 2 (eighths) or 4 (sixteenths)
+        case division       // 2: one sweep per two bars (grid of eighths); 4: one per bar (sixteenths)
+        case quantize       // 0 = exactly at each satellite's bearing … 1 = snapped to the grid
         case dub            // base echo feedback, 0…0.9
         case throwAmt       // 0…1: how far the echo send is thrown open right now
         case reverbSend     // 0…1
         case dust           // 0…1
         case gongTrig, gongFreq, gongVel, gongPan
-        case globalStep          // readback
+        case sweep               // readback: 0…1, the beam's bearing / 360°
+        case beats               // readback: beats since play
         case pingCount, gongCount // readback
     }
 
-    // Pending patterns (main writes)
-    let pHit: UnsafeMutablePointer<Float>      // tracks × maxSteps: probability 0…1 (0 = rest)
+    // Pending satellite lists (main writes), tracks × maxEvents
+    let ePhase: UnsafeMutablePointer<Float>    // bearing / 360°, 0 = north, clockwise
     let pVel: UnsafeMutablePointer<Float>
     let pPan: UnsafeMutablePointer<Float>
     let pFreq: UnsafeMutablePointer<Float>
-    let pLen: UnsafeMutablePointer<Float>      // per track
-    let pGen: UnsafeMutablePointer<Float>      // per track; bump after writing a pattern
+    let eCount: UnsafeMutablePointer<Float>    // per track
+    let pGen: UnsafeMutablePointer<Float>      // per track; bump after writing a list
     let mute: UnsafeMutablePointer<Float>
     let level: UnsafeMutablePointer<Float>
     let bright: UnsafeMutablePointer<Float>    // per track tone (0…1)
@@ -40,8 +45,7 @@ final class OrbitParams {
     let evPan: UnsafeMutablePointer<Float>
 
     // Readback (audio writes)
-    let curStep: UnsafeMutablePointer<Float>   // per track: the step just played
-    let hitCount: UnsafeMutablePointer<Float>  // per track: increments on every hit that fired
+    let hitCount: UnsafeMutablePointer<Float>  // per track: increments on every hit
 
     private let g: UnsafeMutablePointer<Float>
 
@@ -51,14 +55,15 @@ final class OrbitParams {
             p.initialize(repeating: v, count: n)
             return p
         }
-        let T = OrbitParams.tracks, S = OrbitParams.maxSteps, E = OrbitParams.pingSlots
-        pHit = make(0, T * S); pVel = make(0.7, T * S); pPan = make(0, T * S); pFreq = make(110, T * S)
-        pLen = make(16, T); pGen = make(0, T); mute = make(0, T); level = make(1, T); bright = make(0.5, T)
+        let T = OrbitParams.tracks, S = OrbitParams.maxEvents, E = OrbitParams.pingSlots
+        ePhase = make(0, T * S); pVel = make(0.7, T * S); pPan = make(0, T * S); pFreq = make(110, T * S)
+        eCount = make(0, T); pGen = make(0, T); mute = make(0, T); level = make(1, T); bright = make(0.5, T)
         evTrig = make(0, E); evFreq = make(880, E); evVel = make(0.7, E); evPan = make(0, E)
-        curStep = make(0, T); hitCount = make(0, T)
+        hitCount = make(0, T)
         g = make(0, G.allCases.count)
         g[G.bpm.rawValue] = 84
         g[G.division.rawValue] = 2
+        g[G.quantize.rawValue] = 0.5
         g[G.dub.rawValue] = 0.55
         g[G.reverbSend.rawValue] = 0.6
         g[G.gongFreq.rawValue] = 98
@@ -70,8 +75,8 @@ final class OrbitParams {
     }
 
     deinit {
-        [pHit, pVel, pPan, pFreq, pLen, pGen, mute, level, bright,
-         evTrig, evFreq, evVel, evPan, curStep, hitCount, g].forEach { $0.deallocate() }
+        [ePhase, pVel, pPan, pFreq, eCount, pGen, mute, level, bright,
+         evTrig, evFreq, evVel, evPan, hitCount, g].forEach { $0.deallocate() }
     }
 }
 
@@ -91,8 +96,9 @@ final class OrbitParams {
 /// and gently saturated in the loop, with a little tape wow. `dub` sets its feedback; `throwAmt`
 /// opens the send and pushes the feedback toward a spiral, the way a dub engineer rides it.
 ///
-/// The sequencer runs on the audio thread, so hits land on the exact sample. Each step holds a
-/// probability (a Machinedrum-style trig condition) rather than a plain on/off.
+/// The sequencer is a radar sweep on the audio thread: a beam goes round the sky once per one or
+/// two bars, starting at north, and each satellite in a track's cone hits as the beam passes its
+/// bearing (pulled toward a 16-slot grid by `quantize`). Timing is checked every 32 samples.
 ///
 /// Two outputs: dry (with the echoes in it), and a reverb send that the engine feeds through a
 /// plate.
@@ -104,19 +110,18 @@ final class OrbitDSP {
     private static let tableSize = 4096
     private let sine: UnsafeMutablePointer<Float>
 
-    // Sequencer state
-    private let hit: UnsafeMutablePointer<Float>
+    // Sweep state
+    private let phase: UnsafeMutablePointer<Double>   // when each event fires (0…1), after quantizing
     private let vel: UnsafeMutablePointer<Float>
     private let pan: UnsafeMutablePointer<Float>
     private let freq: UnsafeMutablePointer<Float>
-    private let len: UnsafeMutablePointer<Int>
+    private let count: UnsafeMutablePointer<Int>
     private let gen: UnsafeMutablePointer<Float>
-    private let step: UnsafeMutablePointer<Int>
     private let lastEv: UnsafeMutablePointer<Float>
     private var lastGong: Float = 0
     private var running = false
-    private var toTick: Double = 0
-    private var globalStep = 0
+    private var sweep: Double = 0
+    private var beats: Double = 0
     private var bpm: Float = 84
 
     // Drum voices: per-voice scalars in strided blocks
@@ -172,9 +177,11 @@ final class OrbitDSP {
         sine = make(0, n + 1)
         for i in 0...n { sine[i] = sinf(2 * Float.pi * Float(i) / Float(n)) }
         let T = OrbitParams.tracks
-        let TS = T * OrbitParams.maxSteps
-        hit = make(0, TS); vel = make(0, TS); pan = make(0, TS); freq = make(110, TS)
-        len = makeInt(16, T); gen = make(-1, T); step = makeInt(0, T)
+        let TS = T * OrbitParams.maxEvents
+        phase = UnsafeMutablePointer<Double>.allocate(capacity: TS)
+        phase.initialize(repeating: 2, count: TS)
+        vel = make(0, TS); pan = make(0, TS); freq = make(110, TS)
+        count = makeInt(0, T); gen = make(-1, T)
         lastEv = make(0, OrbitParams.pingSlots)
         vs = make(0, VS.allCases.count * OrbitDSP.voices)
         sendL = make(0, OrbitDSP.maxFrames); sendR = make(0, OrbitDSP.maxFrames)
@@ -185,10 +192,10 @@ final class OrbitDSP {
     }
 
     deinit {
-        [sine, hit, vel, pan, freq, gen, lastEv, vs,
+        [sine, vel, pan, freq, gen, lastEv, vs,
          sendL, sendR, verbL, verbR, dlL, dlR].forEach { $0.deallocate() }
-        len.deallocate()
-        step.deallocate()
+        phase.deallocate()
+        count.deallocate()
     }
 
     // MARK: Helpers
@@ -298,26 +305,40 @@ final class OrbitDSP {
         set(.ic1, 0); set(.ic2, 0)
     }
 
-    // MARK: Sequencer
+    // MARK: Sweep
 
+    /// Take a track's new satellite list (called as the beam passes north). Each event's firing
+    /// phase is its bearing, pulled toward the nearest of 16 grid slots by `quantize`; with
+    /// swing, the odd slots sit a little late.
     private func adopt(_ t: Int) {
-        let S = OrbitParams.maxSteps
-        for s in 0..<S {
-            let i = t * S + s
-            hit[i] = p.pHit[i]; vel[i] = p.pVel[i]; pan[i] = p.pPan[i]; freq[i] = p.pFreq[i]
+        let E = OrbitParams.maxEvents
+        let G = Double(OrbitParams.gridSlots)
+        let q = Double(max(0, min(1, p[.quantize])))
+        let sw = Double(max(0, min(0.4, p[.swing])))
+        let n = max(0, min(E, Int(p.eCount[t])))
+        for e in 0..<n {
+            let i = t * E + e
+            let a = Double(max(0, min(1, p.ePhase[i])))
+            let slot = (a * G).rounded()
+            let k = Int(slot)
+            let grid = (slot + (k % 2 == 1 ? sw : 0)) / G
+            var f = a + q * (grid - a)
+            if f >= 1 { f -= 1 }
+            phase[i] = max(0, f)
+            vel[i] = p.pVel[i]; pan[i] = p.pPan[i]; freq[i] = p.pFreq[i]
         }
-        len[t] = max(1, min(S, Int(p.pLen[t])))
+        count[t] = n
         gen[t] = p.pGen[t]
     }
 
-    private func tick() {
-        let S = OrbitParams.maxSteps
-        for t in 0..<OrbitParams.tracks {
-            if step[t] == 0 && p.pGen[t] != gen[t] { adopt(t) }
-            let s = step[t]
-            let i = t * S + s
-            let prob = hit[i]
-            if prob > 0 && p.mute[t] < 0.5 && rand01() < prob {
+    /// Fire every event whose phase falls in [from, to).
+    private func fire(from a: Double, to b: Double) {
+        let E = OrbitParams.maxEvents
+        for t in 0..<OrbitParams.tracks where p.mute[t] < 0.5 {
+            for e in 0..<count[t] {
+                let i = t * E + e
+                let ph = phase[i]
+                guard ph >= a && ph < b else { continue }
                 let v = vel[i] * p.level[t]
                 switch t {
                 case 0: trigger(.kick, f: freq[i], vel: v, pan: pan[i], bright: p.bright[t])
@@ -327,9 +348,11 @@ final class OrbitDSP {
                 }
                 p.hitCount[t] += 1
             }
-            p.curStep[t] = Float(s)
-            step[t] = (s + 1) % len[t]
         }
+    }
+
+    /// Pings and the gong are triggered by the main thread at any moment.
+    private func events() {
         for e in 0..<OrbitParams.pingSlots where p.evTrig[e] != lastEv[e] {
             lastEv[e] = p.evTrig[e]
             trigger(.ping, f: p.evFreq[e], vel: p.evVel[e], pan: p.evPan[e], bright: 0.5)
@@ -340,16 +363,6 @@ final class OrbitDSP {
             trigger(.gong, f: p[.gongFreq], vel: p[.gongVel], pan: p[.gongPan], bright: 0.5)
             p[.gongCount] += 1
         }
-        globalStep += 1
-        p[.globalStep] = Float(globalStep)
-    }
-
-    /// Samples from one step to the next (an eighth or a sixteenth), with swing on the off-steps.
-    private func interval() -> Double {
-        let div = p[.division] > 3 ? 4.0 : 2.0
-        let spb = Double(sr) * 60 / Double(max(30, bpm)) / div
-        let sw = Double(max(0, min(0.4, p[.swing])))
-        return globalStep % 2 == 1 ? spb * (1 + sw) : spb * (1 - sw)
     }
 
     // MARK: Render: voices
@@ -494,28 +507,41 @@ final class OrbitDSP {
         let bt = Float(n) / sr
         bpm += (p[.bpm] - bpm) * (1 - expf(-bt / 0.4))
 
-        // Transport
+        // Transport: the sweep starts at north
         let wantRun = p[.run] > 0.5
         if wantRun && !running {
             running = true
-            for t in 0..<OrbitParams.tracks { step[t] = 0; adopt(t) }
-            globalStep = 0
-            toTick = 0
+            sweep = 0
+            beats = 0
+            for t in 0..<OrbitParams.tracks { adopt(t) }
         } else if !wantRun && running {
             running = false
         }
 
+        // One revolution per bar (sixteenths grid) or per two bars (eighths grid)
+        let sweepBeats: Double = p[.division] > 3 ? 4 : 8
+        let perSample = Double(max(30, bpm)) / 60 / sweepBeats / Double(sr)
         var o = 0
         while o < n {
-            if running && toTick <= 0 {
-                tick()
-                toTick += interval()
+            let m = min(32, n - o)
+            events()
+            if running {
+                let a = sweep
+                var b = a + perSample * Double(m)
+                fire(from: a, to: min(b, 1))
+                if b >= 1 {
+                    b -= 1
+                    for t in 0..<OrbitParams.tracks where p.pGen[t] != gen[t] { adopt(t) }
+                    fire(from: 0, to: b)
+                }
+                sweep = b
+                beats += perSample * Double(m) * sweepBeats
             }
-            let m = running ? min(n - o, max(1, Int(toTick.rounded(.up)))) : n - o
             renderVoices(L, R, from: o, count: m)
-            if running { toTick -= Double(m) }
             o += m
         }
+        p[.sweep] = Float(sweep)
+        p[.beats] = Float(beats)
 
         renderDub(L, R, count: n)
 
