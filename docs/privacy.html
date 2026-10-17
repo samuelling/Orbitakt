@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orbitakt Privacy</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header class="app-head"><img src="icon.png" alt=""><h1>Orbitakt</h1></header>
+  <p class="lede">Privacy policy · effective October 16, 2026</p>
+
+  <p>Orbitakt turns the satellites above you into rhythm. It has no accounts, ads, analytics or tracking, and it never sends anything to the developer.</p>
+
+  <h2>Location</h2>
+  <p>If you allow it, Orbitakt asks iOS for your approximate location (to about a kilometre) while the app is open. It uses it in two ways:</p>
+  <ul>
+    <li><strong>Which satellites are overhead:</strong> calculated entirely on your iPhone. Your location is not sent anywhere for this.</li>
+    <li><strong>Place name:</strong> iOS's built-in geocoding service (provided by Apple) turns your location into a town name to show on screen.</li>
+  </ul>
+  <p>Your location is kept in memory only. If you don't allow location, Orbitakt uses a default place.</p>
+
+  <h2>Satellite data</h2>
+  <p>At most twice a day, Orbitakt downloads the public list of active satellites from <a href="https://celestrak.org/">CelesTrak</a>. The request contains no location or personal information; like any web request, CelesTrak sees your IP address.</p>
+
+  <h2>Playing with Aether and Bellweathered</h2>
+  <p>When the link is on (it is by default, for a few minutes after launch; you can turn it off in Settings › Together), Orbitakt looks for Aether and Bellweathered on nearby iPhones using Apple's peer-to-peer connection (Bluetooth or direct Wi-Fi, no internet). When connected, the apps exchange musical information directly with each other, encrypted: key, scale, tempo, and a short summary (for Orbitakt: how many satellites are overhead, whether a crewed station is up, and the place name it displays). Nothing is sent anywhere else.</p>
+
+  <h2>Stored on your device</h2>
+  <p>Orbitakt stores your settings, a random name for pairing, and the cached satellite list. Deleting the app removes them.</p>
+
+  <h2>Children</h2>
+  <p>Orbitakt does not knowingly collect personal data from anyone, including children.</p>
+
+  <h2>Changes and contact</h2>
+  <p>If this policy changes, the new version will appear on this page with a new date. Questions: <a href="https://github.com/samuelling/Orbitakt/issues">open an issue on GitHub</a>.</p>
+</main>
+</body>
+</html>
