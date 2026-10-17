@@ -87,8 +87,8 @@ final class OrbitParams {
 ///  • NAV kick: a round sine dropping onto the root, a soft click, almost nothing to the echo
 ///  • LEO rimshot: a short tuned knock and a band of noise, mostly *into* the echo
 ///  • SWARM hat: three metallic partials over high-passed noise, tiny and bright
-///  • BELT swish: a soft-attacked breath of band-passed noise, no pitch, its colour set by
-///    where the satellite sits on the arc
+///  • BELT hat: a longer, ringing hat into a gated reverb (a dense room that slams shut
+///    ~150 ms after each hit); its metal is tuned by where the satellite sits on the arc
 ///  • zenith ping: a glass bar, almost all echo
 ///  • CREW gong: slow-struck inharmonic partials with long tails
 ///
@@ -131,9 +131,29 @@ final class OrbitDSP {
         case ph1, ph2, ph3, inc1, inc2, inc3, g1, g2, g3, m1, m2, m3
         case penv, pmul, pdepth
         case na, nmul, hp, fa1, fa2, fa3, fk, ic1, ic2
+        case gsend
     }
     private let vs: UnsafeMutablePointer<Float>
     private var voiceRR = 0
+
+    // Gated reverb (BELT hats): four combs and two allpasses per side, then a gate
+    private static let combTune = [1116, 1188, 1277, 1356]
+    private static let apTune = [556, 441]
+    private let gateIn: UnsafeMutablePointer<Float>
+    private let combBuf: UnsafeMutablePointer<Float>      // 8 combs (4 left, 4 right), each `combCap` long
+    private let combLen: UnsafeMutablePointer<Int>
+    private let combIdx: UnsafeMutablePointer<Int>
+    private let combLP: UnsafeMutablePointer<Float>
+    private let apBuf: UnsafeMutablePointer<Float>        // 4 allpasses (2 left, 2 right)
+    private let apLen: UnsafeMutablePointer<Int>
+    private let apIdx: UnsafeMutablePointer<Int>
+    private let combCap: Int
+    private let apCap: Int
+    private var gateEnv: Float = 0
+    private var gateHold = 0                 // samples left with the gate open
+    private var pendingHold = 0
+    private var gateOpenAt = -1              // sample offset in this block where a hit opens it
+    private var chunkOffset = 0
 
     // Buses
     static let maxFrames = 8192
@@ -186,6 +206,22 @@ final class OrbitDSP {
         vs = make(0, VS.allCases.count * OrbitDSP.voices)
         sendL = make(0, OrbitDSP.maxFrames); sendR = make(0, OrbitDSP.maxFrames)
         verbL = make(0, OrbitDSP.maxFrames); verbR = make(0, OrbitDSP.maxFrames)
+        gateIn = make(0, OrbitDSP.maxFrames)
+        let scale = sampleRate / 44_100
+        combCap = Int(Float(1356 + 40) * scale) + 4
+        apCap = Int(Float(556 + 40) * scale) + 4
+        combBuf = make(0, 8 * combCap); combLP = make(0, 8)
+        combLen = makeInt(1, 8); combIdx = makeInt(0, 8)
+        for c in 0..<8 {
+            let spread = c >= 4 ? 23 : 0
+            combLen[c] = max(1, min(combCap, Int(Float(OrbitDSP.combTune[c % 4] + spread) * scale)))
+        }
+        apBuf = make(0, 4 * apCap)
+        apLen = makeInt(1, 4); apIdx = makeInt(0, 4)
+        for a in 0..<4 {
+            let spread = a >= 2 ? 23 : 0
+            apLen[a] = max(1, min(apCap, Int(Float(OrbitDSP.apTune[a % 2] + spread) * scale)))
+        }
         dlCap = Int(2.6 * sampleRate) + 8
         dlL = make(0, dlCap); dlR = make(0, dlCap)
         dlTime = 0.5 * sampleRate
@@ -196,6 +232,8 @@ final class OrbitDSP {
          sendL, sendR, verbL, verbR, dlL, dlR].forEach { $0.deallocate() }
         phase.deallocate()
         count.deallocate()
+        [gateIn, combBuf, combLP, apBuf].forEach { $0.deallocate() }
+        [combLen, combIdx, apLen, apIdx].forEach { $0.deallocate() }
     }
 
     // MARK: Helpers
@@ -218,7 +256,7 @@ final class OrbitDSP {
 
     // MARK: Drum note-on
 
-    private enum Kind { case kick, rim, hat, swish, ping, gong }
+    private enum Kind { case kick, rim, hat, gatedHat, ping, gong }
 
     private struct Recipe {
         var r1: Float = 1, r2: Float = 0, r3: Float = 0
@@ -227,6 +265,7 @@ final class OrbitDSP {
         var pdepth: Float = 0, ptau: Float = 0.05
         var na: Float = 0, ntau: Float = 0.05, nfc: Float = 2000, nq: Float = 1, highpass = false
         var atk: Float = 0.001, gain: Float = 0.5, send: Float = 0.3
+        var gsend: Float = 0
     }
 
     private func recipe(_ kind: Kind, f: Float, vel: Float, bright: Float) -> Recipe {
@@ -253,11 +292,14 @@ final class OrbitDSP {
             r.na = 0.75; r.ntau = 0.014 + 0.03 * vel; r.nfc = 6500 + 2500 * bright; r.nq = 0.7
             r.highpass = true
             r.atk = 0.0012; r.gain = 0.3; r.send = 0.35
-        case .swish:
-            // A breath of air: band-passed noise with a soft attack and no partials at all
-            r.a1 = 0
-            r.na = 0.9; r.ntau = 0.08 + 0.07 * vel; r.nfc = f; r.nq = 1.4
-            r.atk = 0.018; r.gain = 0.3; r.send = 0.7
+        case .gatedHat:
+            // A longer, ringing hat (metal tuned by f) that drives the gated reverb
+            r.r1 = 1; r.r2 = 1.342; r.r3 = 1.791
+            r.a1 = 0.26; r.a2 = 0.22; r.a3 = 0.16
+            r.t1 = 0.06 + 0.05 * vel; r.t2 = 0.05; r.t3 = 0.04
+            r.na = 0.8; r.ntau = 0.05 + 0.05 * vel; r.nfc = 6000 + 2000 * bright; r.nq = 0.7
+            r.highpass = true
+            r.atk = 0.001; r.gain = 0.26; r.send = 0.15; r.gsend = 1
         case .ping:
             r.r2 = 2.76; r.r3 = 5.40; r.a2 = 0.3; r.a3 = 0.1
             r.t1 = 1.2; r.t2 = 0.4; r.t3 = 0.1
@@ -303,6 +345,12 @@ final class OrbitDSP {
         let a1 = 1 / (1 + gg * (gg + k))
         set(.fa1, a1); set(.fa2, gg * a1); set(.fa3, gg * gg * a1); set(.fk, k)
         set(.ic1, 0); set(.ic2, 0)
+        set(.gsend, r.gsend)
+        if r.gsend > 0 {
+            // Open the gate at this hit: ~150 ms, a touch longer for a louder hit
+            gateOpenAt = chunkOffset
+            pendingHold = Int((0.13 + 0.05 * min(1, vel)) * sr)
+        }
     }
 
     // MARK: Sweep
@@ -344,7 +392,7 @@ final class OrbitDSP {
                 case 0: trigger(.kick, f: freq[i], vel: v, pan: pan[i], bright: p.bright[t])
                 case 1: trigger(.rim, f: freq[i], vel: v, pan: pan[i], bright: p.bright[t])
                 case 2: trigger(.hat, f: freq[i], vel: v, pan: pan[i], bright: p.bright[t])
-                default: trigger(.swish, f: freq[i], vel: v, pan: pan[i], bright: p.bright[t])
+                default: trigger(.gatedHat, f: freq[i], vel: v, pan: pan[i], bright: p.bright[t])
                 }
                 p.hitCount[t] += 1
             }
@@ -385,6 +433,7 @@ final class OrbitDSP {
             let nmul = vs[at(.nmul, v)], hp = vs[at(.hp, v)] > 0.5
             let fa1 = vs[at(.fa1, v)], fa2 = vs[at(.fa2, v)], fa3 = vs[at(.fa3, v)], fk = vs[at(.fk, v)]
             var ic1 = vs[at(.ic1, v)], ic2 = vs[at(.ic2, v)]
+            let gs = vs[at(.gsend, v)] * amp * 0.7
             let noisy = na > 1e-5
             for i in o..<(o + m) {
                 let pm = 1 + pdepth * penv
@@ -411,6 +460,7 @@ final class OrbitDSP {
                 R[i] += y * gr
                 sendL[i] += y * gl * snd
                 sendR[i] += y * gr * snd
+                if gs > 0 { gateIn[i] += y * gs }
             }
             vs[at(.age, v)] = age
             vs[at(.ph1, v)] = ph1; vs[at(.ph2, v)] = ph2; vs[at(.ph3, v)] = ph3
@@ -420,6 +470,57 @@ final class OrbitDSP {
             vs[at(.ic2, v)] = abs(ic2) < 1e-15 ? 0 : ic2
             if age > atk && g1 + g2 + g3 + na < 1e-4 { vs[at(.on, v)] = 0 }
         }
+    }
+
+    // MARK: Render: the gated reverb
+
+    /// A dense, bright room (Freeverb-style combs and allpasses), heard only through a gate that
+    /// a BELT hit throws open and that slams shut ~150 ms later, cutting the tail dead.
+    private func renderGate(_ L: UnsafeMutablePointer<Float>, _ R: UnsafeMutablePointer<Float>, count n: Int) {
+        let fbk: Float = 0.86, damp: Float = 0.22
+        let release = expf(-1 / (0.006 * sr))
+        let attack = 1 - expf(-1 / (0.0015 * sr))
+        let wet: Float = 1.0
+        let C = combCap, A = apCap
+        for i in 0..<n {
+            if i == gateOpenAt { gateHold = max(gateHold, pendingHold) }
+            if gateHold > 0 {
+                gateHold -= 1
+                gateEnv += (1 - gateEnv) * attack
+            } else {
+                gateEnv *= release
+            }
+            let x = gateIn[i] * 0.2
+            var outL: Float = 0, outR: Float = 0
+            for c in 0..<8 {
+                let base = c * C
+                let j = combIdx[c]
+                let y = combBuf[base + j]
+                combLP[c] = y * (1 - damp) + combLP[c] * damp
+                combBuf[base + j] = x + combLP[c] * fbk
+                combIdx[c] = j + 1 >= combLen[c] ? 0 : j + 1
+                if c < 4 { outL += y } else { outR += y }
+            }
+            for a in 0..<4 {
+                let base = a * A
+                let j = apIdx[a]
+                let b = apBuf[base + j]
+                let inp = a < 2 ? outL : outR
+                let o = b - inp
+                apBuf[base + j] = inp + b * 0.5
+                apIdx[a] = j + 1 >= apLen[a] ? 0 : j + 1
+                if a < 2 { outL = o } else { outR = o }
+            }
+            let g = gateEnv * wet
+            L[i] += outL * g
+            R[i] += outR * g
+            // A little of the gated room reaches the dub echo too
+            sendL[i] += outL * g * 0.2
+            sendR[i] += outR * g * 0.2
+        }
+        gateOpenAt = -1
+        for c in 0..<8 where abs(combLP[c]) < 1e-15 { combLP[c] = 0 }
+        if gateEnv < 1e-6 { gateEnv = 0 }
     }
 
     // MARK: Render: the dub delay and dust
@@ -504,6 +605,7 @@ final class OrbitDSP {
         let n = min(n0, OrbitDSP.maxFrames)
         sendL.update(repeating: 0, count: n)
         sendR.update(repeating: 0, count: n)
+        gateIn.update(repeating: 0, count: n)
         let bt = Float(n) / sr
         bpm += (p[.bpm] - bpm) * (1 - expf(-bt / 0.4))
 
@@ -524,6 +626,7 @@ final class OrbitDSP {
         var o = 0
         while o < n {
             let m = min(32, n - o)
+            chunkOffset = o
             events()
             if running {
                 let a = sweep
@@ -543,6 +646,7 @@ final class OrbitDSP {
         p[.sweep] = Float(sweep)
         p[.beats] = Float(beats)
 
+        renderGate(L, R, count: n)
         renderDub(L, R, count: n)
 
         // Master: soft clip the dry bus; the plate send takes the same gain

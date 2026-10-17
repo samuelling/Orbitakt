@@ -13,7 +13,7 @@ It's the percussion piece of the environmental set with [Aether](https://github.
 | **NAV** | GPS, Galileo, GLONASS, BeiDou (~20,000 km) | deep kick on the root | ~4 | Bearings change over hours, so the kick pattern shifts slowly |
 | **LEO** | Low orbits except Starlink: OneWeb, Iridium, weather and science satellites | tuned rimshot, mostly into the echo | ~2 | Each crosses the sky in about ten minutes; you hear its hit slide through the sweep. New arrivals throw the echo |
 | **SWARM** | Starlink | metallic hat, brighter as more of the swarm is up | ~5 | Hats drift, flam and merge as satellites cross |
-| **BELT** | The geostationary belt | swish: a soft breath of air, no pitch | ~2 | Never moves: your location's fingerprint |
+| **BELT** | The geostationary belt | hi-hat into a gated reverb | ~2 | Never moves: your location's fingerprint |
 
 **The cone.** Each track listens to a cone of sky around the zenith, and every satellite inside it plays once per sweep. The cone adapts slowly (ten-minute time constant) to hold about the target number on average. That divides out the difference between Starlink's hundreds and GPS's dozen, while a busy or empty spell still comes through as more or fewer hits. You can fix a cone by hand in Settings.
 
@@ -21,7 +21,7 @@ It's the percussion piece of the environmental set with [Aether](https://github.
 
 **Literal ⟷ Grid.** Quantize pulls each hit from its exact bearing toward the nearest of 16 slots per sweep (eighths when a sweep is two bars). At 0 every hit is exactly where its satellite is, with the micro-timing that comes with it. At 100 it's a tight grid; swing applies to the grid. Default 50.
 
-**The swish.** BELT hits are a soft-attacked breath of band-passed noise with no pitch, mostly into the echo. Its colour comes from where that satellite sits along the geostationary arc: darker in the east (about 700 Hz), airier toward the west (about 4.5 kHz).
+**The gated hat.** BELT hits are a longer, ringing hi-hat driving a gated reverb: a dense, bright room that the hit throws open and that slams shut about 150 ms later, cutting the tail dead. A little of the gated room reaches the dub echo. The hat's metal is tuned by where that satellite sits along the geostationary arc: darker in the east (about 3.8 kHz), brighter toward the west (about 6.2 kHz).
 
 **The dub echo** is built into the engine: a stereo ping-pong on a dotted eighth, high- and low-passed and gently saturated in the loop, so repeats get darker and rounder, with a touch of tape wow. A plate reverb sits after it.
 - *Throws:* whenever a low-orbit satellite crosses into its cone, or something passes straight overhead, the echo send is thrown open and the feedback pushed toward a spiral. It falls back over a few seconds, the way a dub engineer rides the send. The dome's horizon glows while it happens.

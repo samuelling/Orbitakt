@@ -256,7 +256,7 @@ private struct TrackSettings: View {
         case .nav: return "GPS, Galileo, GLONASS and BeiDou, 20,000 km up. The cone holds about four on average; each kicks as the beam passes its bearing. They cross the sky in hours, so the kick pattern shifts slowly. A deep kick on the root."
         case .leo: return "Low orbits other than Starlink: OneWeb, Iridium, weather and science satellites. About two in the cone; each crosses the sky in roughly ten minutes, so you hear its hit slide through the sweep. A tuned rimshot, mostly into the echo, and each new arrival throws the echo open."
         case .swarm: return "Starlink. Thousands of them, so the cone is narrow and hats drift, flam and merge as satellites cross. Metallic hats that brighten as more of the swarm is up; higher ones play louder."
-        case .belt: return "The geostationary belt: a fixed arc across your sky, to the south in the northern hemisphere. It never moves, so these hits stay put: your location's fingerprint. A soft breath of air with no pitch: darker for satellites in the east, airier toward the west."
+        case .belt: return "The geostationary belt: a fixed arc across your sky, to the south in the northern hemisphere. It never moves, so these hits stay put: your location's fingerprint. A hi-hat into a gated reverb: a dense room that slams shut about 150 ms after each hit. Its metal is tuned by position, darker in the east, brighter toward the west."
         default: return ""
         }
     }

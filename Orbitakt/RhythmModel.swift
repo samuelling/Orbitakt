@@ -40,12 +40,12 @@ enum TempoSource: String, CaseIterable, Identifiable {
 /// family's cone on the radar at its real bearing, and drives the engine and the link.
 @MainActor
 final class RhythmModel: NSObject, ObservableObject {
-    /// Sparse on purpose: about four kicks, two rimshots, five hats and two swishes a sweep.
+    /// Sparse on purpose: about four kicks, two rimshots, five hats and two gated hats a sweep.
     static let specs: [TrackSpec] = [
         TrackSpec(family: .nav, sound: "kick", color: Color(red: 1.0, green: 0.55, blue: 0.25), target: 4),
         TrackSpec(family: .leo, sound: "rim", color: Color(red: 0.45, green: 0.85, blue: 0.55), target: 2),
         TrackSpec(family: .swarm, sound: "hat", color: Color(red: 0.45, green: 0.75, blue: 1.0), target: 5),
-        TrackSpec(family: .belt, sound: "swish", color: Color(red: 0.85, green: 0.6, blue: 1.0), target: 2),
+        TrackSpec(family: .belt, sound: "gate hat", color: Color(red: 0.85, green: 0.6, blue: 1.0), target: 2),
     ]
     static let crewColor = Color(red: 1.0, green: 0.85, blue: 0.4)
 
@@ -371,10 +371,10 @@ final class RhythmModel: NSObject, ObservableObject {
             return mtof(Double(81 + root + semis(2, sc)))
         case 2:   // hat partials sit in a fixed metallic band
             return 5400
-        case 3:   // the swish's colour, from where the satellite sits along the belt:
-                  // a dark breath in the east (≈ 700 Hz) to an airy one in the west (≈ 4.5 kHz)
+        case 3:   // the gated hat's metal, tuned by where the satellite sits along the belt:
+                  // darker in the east (≈ 3.8 kHz) to brighter in the west (≈ 6.2 kHz)
             let x = clamp01((1 - sin(Double(b.az) * .pi / 180)) / 2)   // east 0 … west 1
-            return 700 * pow(2, 2.7 * x)
+            return 3800 * pow(2, 0.7 * x)
         default:
             return 1000
         }
