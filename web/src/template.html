@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Orbitakt</title>
+<meta name="description" content="A drum machine played by the satellites overhead. Live orbits, computed in your browser.">
+<meta name="theme-color" content="#0a0d14">
+<style>
+:root { --bg:#0a0d14; --ink:#cfd6e6; --dim:#8a94ab; --line:rgba(160,180,220,.18); --accent:#9cc7ff; }
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+#app { max-width: 560px; margin: 0 auto; padding: 20px 16px 48px; padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); }
+h1 { margin: 0; font-size: 28px; font-weight: 600; letter-spacing: .02em; }
+.tag { margin: 2px 0 0; color: var(--dim); }
+.status { margin: 14px 0 4px; color: var(--dim); font-size: 13px; min-height: 1.4em; }
+.domewrap { position: relative; width: 100%; aspect-ratio: 1 / 1; }
+#dome { width: 100%; height: 100%; display: block; }
+.controls { display: flex; align-items: center; gap: 16px; margin: 6px 0 14px; }
+.play { min-width: 112px; height: 48px; border-radius: 24px; border: 1px solid var(--accent); background: transparent; color: var(--accent); font: 600 16px system-ui, sans-serif; cursor: pointer; }
+.play[aria-pressed="true"] { background: var(--accent); color: var(--bg); }
+.play:focus-visible, .btn:focus-visible, .mute:focus-visible, summary:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.crew { color: #ffd966; font-size: 14px; }
+.rows { display: grid; gap: 10px; }
+.rh { display: flex; align-items: center; gap: 10px; font-size: 13px; margin-bottom: 3px; }
+.rl { font-weight: 600; }
+.ri { color: var(--dim); flex: 1; }
+.mute { width: 28px; height: 24px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--dim); font: 600 12px system-ui; cursor: pointer; }
+.mute.on { background: #ff5a5f; border-color: #ff5a5f; color: #fff; }
+.rowcanvas { width: 100%; height: 30px; display: block; border-radius: 6px; }
+.readings { display: flex; flex-wrap: wrap; gap: 6px 22px; margin: 18px 0 8px; align-items: baseline; }
+.reading b { font-size: 22px; font-weight: 600; margin-right: 6px; font-variant-numeric: tabular-nums; }
+.reading span { color: var(--dim); font-size: 13px; }
+.datanote { width: 100%; color: var(--dim); font-size: 12px; }
+.settings { margin-top: 18px; border-top: 1px solid var(--line); }
+details { border-bottom: 1px solid var(--line); }
+summary { padding: 12px 0; cursor: pointer; font-weight: 500; }
+.sec { padding: 0 0 12px; display: grid; gap: 10px; }
+.ctl { display: grid; grid-template-columns: 1fr 1.4fr auto; gap: 10px; align-items: center; font-size: 14px; }
+.ctl.check { grid-template-columns: auto 1fr; }
+.ctl output { color: var(--dim); font-size: 12px; min-width: 52px; text-align: right; font-variant-numeric: tabular-nums; }
+select, input[type=range] { width: 100%; }
+select { background: #141a28; color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 6px; grid-column: span 2; }
+.btn { justify-self: start; background: transparent; color: var(--accent); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; font-size: 14px; cursor: pointer; }
+.note { margin-top: 28px; color: var(--dim); font-size: 14px; }
+.note h2 { color: var(--ink); font-size: 17px; margin: 0 0 8px; }
+.note .small { font-size: 12px; }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<noscript><p style="padding:20px">Orbitakt needs JavaScript and Web Audio.</p></noscript>
+<script type="text/plain" id="worklet-src">/*WORKLET*/</script>
+<script>
+/*BUNDLE*/
+</script>
+</body>
+</html>

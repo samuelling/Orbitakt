@@ -1,0 +1,2216 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Orbitakt</title>
+<meta name="description" content="A drum machine played by the satellites overhead. Live orbits, computed in your browser.">
+<meta name="theme-color" content="#0a0d14">
+<style>
+:root { --bg:#0a0d14; --ink:#cfd6e6; --dim:#8a94ab; --line:rgba(160,180,220,.18); --accent:#9cc7ff; }
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+#app { max-width: 560px; margin: 0 auto; padding: 20px 16px 48px; padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); }
+h1 { margin: 0; font-size: 28px; font-weight: 600; letter-spacing: .02em; }
+.tag { margin: 2px 0 0; color: var(--dim); }
+.status { margin: 14px 0 4px; color: var(--dim); font-size: 13px; min-height: 1.4em; }
+.domewrap { position: relative; width: 100%; aspect-ratio: 1 / 1; }
+#dome { width: 100%; height: 100%; display: block; }
+.controls { display: flex; align-items: center; gap: 16px; margin: 6px 0 14px; }
+.play { min-width: 112px; height: 48px; border-radius: 24px; border: 1px solid var(--accent); background: transparent; color: var(--accent); font: 600 16px system-ui, sans-serif; cursor: pointer; }
+.play[aria-pressed="true"] { background: var(--accent); color: var(--bg); }
+.play:focus-visible, .btn:focus-visible, .mute:focus-visible, summary:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.crew { color: #ffd966; font-size: 14px; }
+.rows { display: grid; gap: 10px; }
+.rh { display: flex; align-items: center; gap: 10px; font-size: 13px; margin-bottom: 3px; }
+.rl { font-weight: 600; }
+.ri { color: var(--dim); flex: 1; }
+.mute { width: 28px; height: 24px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--dim); font: 600 12px system-ui; cursor: pointer; }
+.mute.on { background: #ff5a5f; border-color: #ff5a5f; color: #fff; }
+.rowcanvas { width: 100%; height: 30px; display: block; border-radius: 6px; }
+.readings { display: flex; flex-wrap: wrap; gap: 6px 22px; margin: 18px 0 8px; align-items: baseline; }
+.reading b { font-size: 22px; font-weight: 600; margin-right: 6px; font-variant-numeric: tabular-nums; }
+.reading span { color: var(--dim); font-size: 13px; }
+.datanote { width: 100%; color: var(--dim); font-size: 12px; }
+.settings { margin-top: 18px; border-top: 1px solid var(--line); }
+details { border-bottom: 1px solid var(--line); }
+summary { padding: 12px 0; cursor: pointer; font-weight: 500; }
+.sec { padding: 0 0 12px; display: grid; gap: 10px; }
+.ctl { display: grid; grid-template-columns: 1fr 1.4fr auto; gap: 10px; align-items: center; font-size: 14px; }
+.ctl.check { grid-template-columns: auto 1fr; }
+.ctl output { color: var(--dim); font-size: 12px; min-width: 52px; text-align: right; font-variant-numeric: tabular-nums; }
+select, input[type=range] { width: 100%; }
+select { background: #141a28; color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 6px; grid-column: span 2; }
+.btn { justify-self: start; background: transparent; color: var(--accent); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; font-size: 14px; cursor: pointer; }
+.note { margin-top: 28px; color: var(--dim); font-size: 14px; }
+.note h2 { color: var(--ink); font-size: 17px; margin: 0 0 8px; }
+.note .small { font-size: 12px; }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<noscript><p style="padding:20px">Orbitakt needs JavaScript and Web Audio.</p></noscript>
+<script type="text/plain" id="worklet-src">'use strict';
+/* Orbitakt's sound engine: a port of OrbitDSP.swift.
+ *
+ * The kit is synthesized in the spirit of a Machinedrum played through a dub desk. Every sound
+ * is one "modal" voice (up to three decaying sine partials with a pitch sweep, plus filtered
+ * noise) with a different recipe per drum:
+ *   NAV kick     a round sine dropping onto the root, a soft click, almost nothing to the echo
+ *   LEO rimshot  a short tuned knock and a band of noise, mostly *into* the echo
+ *   SWARM hat    three metallic partials over high-passed noise, tiny and bright
+ *   BELT hat     a longer, ringing hat into a gated reverb (a dense room that slams shut about
+ *                150 ms after each hit); its metal is tuned by where the satellite sits
+ *   zenith ping  a glass bar, almost all echo
+ *   CREW gong    slow-struck inharmonic partials with long tails
+ *
+ * The dub delay lives here too: a stereo ping-pong on a dotted eighth, high- and low-passed and
+ * gently saturated in the loop, with a little tape wow. `dub` sets its feedback; `throwAmt`
+ * opens the send and pushes the feedback toward a spiral, the way a dub engineer rides it.
+ *
+ * The sequencer is a radar sweep: a beam goes round the sky once per one or two bars, starting
+ * at north, and each satellite in a track's cone hits as the beam passes its bearing (pulled
+ * toward a 16-slot grid by `quantize`). Timing is checked every 32 samples.
+ *
+ * Two outputs: dry (with the echoes in it), and a reverb send that the page feeds through a
+ * plate reverb (a convolver).
+ *
+ * No browser APIs in this file: it runs in an AudioWorklet and in Node (for the tests).
+ */
+
+const OD = {
+  TRACKS: 4,
+  MAX_EVENTS: 32,
+  PING_SLOTS: 4,
+  GRID_SLOTS: 16,
+  VOICES: 24,
+  TABLE: 4096,
+  MAX_FRAMES: 8192,
+  COMB_TUNE: [1116, 1188, 1277, 1356],
+  AP_TUNE: [556, 441],
+};
+
+// Voice-state slots (each is a block of VOICES values)
+const VS = {};
+['on', 'age', 'atk', 'amp', 'gl', 'gr', 'send',
+ 'ph1', 'ph2', 'ph3', 'inc1', 'inc2', 'inc3', 'g1', 'g2', 'g3', 'm1', 'm2', 'm3',
+ 'penv', 'pmul', 'pdepth',
+ 'na', 'nmul', 'hp', 'fa1', 'fa2', 'fa3', 'fk', 'ic1', 'ic2',
+ 'gsend'].forEach((k, i) => { VS[k] = i; });
+const VS_COUNT = Object.keys(VS).length;
+
+class OrbitDSP {
+  constructor(sampleRate) {
+    const sr = sampleRate;
+    this.sr = sr;
+    this.rng = 0x2545F491 | 0;
+
+    // Control surface (written from the main thread through setParam / setList)
+    const T = OD.TRACKS, E = OD.MAX_EVENTS;
+    this.g = {
+      master: 0, run: 0, bpm: 84, swing: 0, division: 2, quantize: 0.5, dub: 0.55,
+      throwAmt: 0, reverbSend: 0.6, dust: 0,
+    };
+    this.mute = new Float64Array(T);
+    this.level = new Float64Array(T).fill(1);
+    this.bright = new Float64Array(T).fill(0.5);
+    // Pending satellite lists (adopted when the sweep passes north)
+    this.ePhase = new Float64Array(T * E);
+    this.pVel = new Float64Array(T * E).fill(0.7);
+    this.pPan = new Float64Array(T * E);
+    this.pFreq = new Float64Array(T * E).fill(110);
+    this.eCount = new Int32Array(T);
+    this.pGen = new Int32Array(T);
+    // Triggers from the main thread
+    this.pingQueue = [];
+    this.gongQueue = [];
+
+    // Sine table
+    this.sine = new Float32Array(OD.TABLE + 1);
+    for (let i = 0; i <= OD.TABLE; i++) this.sine[i] = Math.sin(2 * Math.PI * i / OD.TABLE);
+
+    // Sweep state: when each event fires (0..1) after quantizing, and its voice settings
+    this.phase = new Float64Array(T * E).fill(2);
+    this.vel = new Float64Array(T * E);
+    this.pan = new Float64Array(T * E);
+    this.freq = new Float64Array(T * E).fill(110);
+    this.count = new Int32Array(T);
+    this.gen = new Int32Array(T).fill(-1);
+    this.running = false;
+    this.sweep = 0;
+    this.beats = 0;
+    this.bpm = 84;
+
+    // Drum voices
+    this.vs = new Float64Array(VS_COUNT * OD.VOICES);
+    this.voiceRR = 0;
+
+    // Gated reverb (BELT hats): four combs and two allpasses per side, then a gate
+    const scale = sr / 44100;
+    this.combCap = Math.floor((1356 + 40) * scale) + 4;
+    this.apCap = Math.floor((556 + 40) * scale) + 4;
+    this.combBuf = new Float32Array(8 * this.combCap);
+    this.combLP = new Float64Array(8);
+    this.combLen = new Int32Array(8).fill(1);
+    this.combIdx = new Int32Array(8);
+    for (let c = 0; c < 8; c++) {
+      const spread = c >= 4 ? 23 : 0;
+      this.combLen[c] = Math.max(1, Math.min(this.combCap, Math.floor((OD.COMB_TUNE[c % 4] + spread) * scale)));
+    }
+    this.apBuf = new Float32Array(4 * this.apCap);
+    this.apLen = new Int32Array(4).fill(1);
+    this.apIdx = new Int32Array(4);
+    for (let a = 0; a < 4; a++) {
+      const spread = a >= 2 ? 23 : 0;
+      this.apLen[a] = Math.max(1, Math.min(this.apCap, Math.floor((OD.AP_TUNE[a % 2] + spread) * scale)));
+    }
+    this.gateIn = new Float32Array(OD.MAX_FRAMES);
+    this.gateEnv = 0;
+    this.gateHold = 0;          // samples left with the gate open
+    this.pendingHold = 0;
+    this.gateOpenAt = -1;       // sample offset in this block where a hit opens it
+    this.chunkOffset = 0;
+
+    // Buses
+    this.sendL = new Float32Array(OD.MAX_FRAMES);   // into the echo
+    this.sendR = new Float32Array(OD.MAX_FRAMES);
+    this.verbL = new Float32Array(OD.MAX_FRAMES);   // into the plate
+    this.verbR = new Float32Array(OD.MAX_FRAMES);
+    this.masterG = 0;
+
+    // Dub delay
+    this.dlCap = Math.floor(2.6 * sr) + 8;
+    this.dlL = new Float32Array(this.dlCap);
+    this.dlR = new Float32Array(this.dlCap);
+    this.dlW = 0;
+    this.dlTime = 0.5 * sr;    // samples, smoothed (tape-like glide on tempo changes)
+    this.wowPh = 0;
+    this.fb = 0.55;
+    this.inGain = 0.55;
+    this.hpL = 0; this.hpR = 0; this.lpL = 0; this.lpR = 0;
+    this.reverbSend = 0.6;
+
+    // Dust
+    this.dust = 0;
+    this.hissL = 0; this.hissR = 0;
+    this.crackle = 0;
+  }
+
+  // ---------- Control ----------
+
+  setParam(k, v) { if (k in this.g) this.g[k] = v; }
+
+  setMute(t, v) { this.mute[t] = v ? 1 : 0; }
+
+  setBright(t, v) { this.bright[t] = v; }
+
+  /** A track's new satellite list: arrays of phase (bearing/360), vel, pan, freq. */
+  setList(t, list) {
+    const E = OD.MAX_EVENTS;
+    const n = Math.max(0, Math.min(E, list.count | 0));
+    for (let e = 0; e < n; e++) {
+      const i = t * E + e;
+      this.ePhase[i] = list.phase[e]; this.pVel[i] = list.vel[e];
+      this.pPan[i] = list.pan[e]; this.pFreq[i] = list.freq[e];
+    }
+    this.eCount[t] = n;
+    this.pGen[t] += 1;
+  }
+
+  ping(freq, vel, pan) { if (this.pingQueue.length < 16) this.pingQueue.push([freq, vel, pan]); }
+
+  gong(freq, vel, pan) { if (this.gongQueue.length < 4) this.gongQueue.push([freq, vel, pan]); }
+
+  // ---------- Helpers ----------
+
+  sn(ph) {
+    const x = ph * OD.TABLE;
+    let i = Math.floor(x);
+    if (i < 0) i = 0; else if (i > OD.TABLE - 1) i = OD.TABLE - 1;
+    const f = x - i;
+    const s = this.sine;
+    return s[i] + (s[i + 1] - s[i]) * f;
+  }
+
+  white() {
+    let r = this.rng;
+    r ^= r << 13; r ^= r >>> 17; r ^= r << 5;
+    this.rng = r;
+    return (r >>> 8) / 8388608 - 1;
+  }
+
+  rand01() { return 0.5 * (this.white() + 1); }
+
+  // ---------- Drum note-on ----------
+
+  recipe(kind, f, vel, bright) {
+    const r = {
+      r1: 1, r2: 0, r3: 0, a1: 1, a2: 0, a3: 0, t1: 0.3, t2: 0.1, t3: 0.1,
+      pdepth: 0, ptau: 0.05, na: 0, ntau: 0.05, nfc: 2000, nq: 1, highpass: false,
+      atk: 0.001, gain: 0.5, send: 0.3, gsend: 0,
+    };
+    switch (kind) {
+      case 'kick':
+        // Round and short-attacked, like a Machinedrum EFM kick with the decay up
+        r.r2 = 2; r.a2 = 0.05; r.t1 = 0.13 + 0.09 * vel; r.t2 = 0.04;
+        r.pdepth = 3.0; r.ptau = 0.018;
+        r.na = 0.10; r.ntau = 0.003; r.nfc = 3200; r.nq = 0.8;
+        r.atk = 0.002; r.gain = 0.75; r.send = 0.03;
+        break;
+      case 'rim':
+        // A tuned rimshot: short knock, a bandpassed tick, mostly thrown into the echo
+        r.r2 = 1.48; r.a1 = 0.65; r.a2 = 0.3;
+        r.t1 = 0.028; r.t2 = 0.016;
+        r.pdepth = 0.04; r.ptau = 0.008;
+        r.na = 0.45; r.ntau = 0.012; r.nfc = f * 1.15; r.nq = 2.2;
+        r.atk = 0.0008; r.gain = 0.6; r.send = 0.9;
+        break;
+      case 'hat':
+        // Metallic partials over high-passed noise; brighter for a busier Starlink sky
+        r.r2 = 1.342; r.r3 = 1.791;
+        r.a1 = 0.22; r.a2 = 0.18; r.a3 = 0.14;
+        r.t1 = 0.022 + 0.02 * vel; r.t2 = 0.018; r.t3 = 0.014;
+        r.na = 0.75; r.ntau = 0.014 + 0.03 * vel; r.nfc = 6500 + 2500 * bright; r.nq = 0.7;
+        r.highpass = true;
+        r.atk = 0.0012; r.gain = 0.3; r.send = 0.35;
+        break;
+      case 'gatedHat':
+        // A longer, ringing hat (metal tuned by f) that drives the gated reverb
+        r.r1 = 1; r.r2 = 1.342; r.r3 = 1.791;
+        r.a1 = 0.26; r.a2 = 0.22; r.a3 = 0.16;
+        r.t1 = 0.06 + 0.05 * vel; r.t2 = 0.05; r.t3 = 0.04;
+        r.na = 0.8; r.ntau = 0.05 + 0.05 * vel; r.nfc = 6000 + 2000 * bright; r.nq = 0.7;
+        r.highpass = true;
+        r.atk = 0.001; r.gain = 0.26; r.send = 0.15; r.gsend = 1;
+        break;
+      case 'ping':
+        r.r2 = 2.76; r.r3 = 5.40; r.a2 = 0.3; r.a3 = 0.1;
+        r.t1 = 1.2; r.t2 = 0.4; r.t3 = 0.1;
+        r.atk = 0.0015; r.gain = 0.16; r.send = 1.0;
+        break;
+      case 'gong':
+        r.r2 = 1.47; r.r3 = 2.09; r.a2 = 0.55; r.a3 = 0.35;
+        r.t1 = 4.0; r.t2 = 2.6; r.t3 = 1.6;
+        r.pdepth = 0.015; r.ptau = 1.2;
+        r.na = 0.04; r.ntau = 0.2; r.nfc = f * 4; r.nq = 1.5;
+        r.atk = 0.06; r.gain = 0.22; r.send = 0.85;
+        break;
+    }
+    return r;
+  }
+
+  trigger(kind, f, vel, pn, bright) {
+    const V = OD.VOICES, vs = this.vs, sr = this.sr;
+    // A free voice, else the oldest
+    let v = -1;
+    for (let i = 0; i < V; i++) {
+      const k = (this.voiceRR + i) % V;
+      if (vs[VS.on * V + k] < 0.5) { v = k; break; }
+    }
+    if (v < 0) {
+      let oldest = -1;
+      for (let i = 0; i < V; i++) if (vs[VS.age * V + i] > oldest) { oldest = vs[VS.age * V + i]; v = i; }
+    }
+    this.voiceRR = (v + 1) % V;
+    f = Math.max(20, f);
+    const r = this.recipe(kind, f, vel, bright);
+    const set = (k, x) => { vs[VS[k] * V + v] = x; };
+    const dec = tau => Math.exp(-1 / (Math.max(0.001, tau) * sr));
+    const ang = (Math.max(-1, Math.min(1, pn)) + 1) * Math.PI / 4;
+    set('on', 1); set('age', 0); set('atk', Math.max(1, r.atk * sr));
+    set('amp', r.gain * Math.max(0, Math.min(1.2, vel)));
+    set('gl', Math.cos(ang)); set('gr', Math.sin(ang)); set('send', r.send);
+    const i1 = f * r.r1 / sr, i2 = f * r.r2 / sr, i3 = f * r.r3 / sr;
+    set('inc1', i1); set('inc2', i2); set('inc3', i3);
+    // Partials above ~0.45*sr (allowing for the pitch sweep) are left out
+    const top = 0.45 / (1 + r.pdepth);
+    set('g1', i1 < top ? r.a1 : 0); set('g2', i2 < top ? r.a2 : 0); set('g3', i3 < top ? r.a3 : 0);
+    set('m1', dec(r.t1)); set('m2', dec(r.t2)); set('m3', dec(r.t3));
+    set('ph1', 0); set('ph2', 0.25); set('ph3', 0.5);
+    set('penv', 1); set('pmul', dec(r.ptau)); set('pdepth', r.pdepth);
+    set('na', r.na); set('nmul', dec(r.ntau)); set('hp', r.highpass ? 1 : 0);
+    const k = 1 / Math.max(0.5, r.nq);
+    const gg = Math.tan(Math.PI * Math.min(Math.max(r.nfc, 40), sr * 0.45) / sr);
+    const a1 = 1 / (1 + gg * (gg + k));
+    set('fa1', a1); set('fa2', gg * a1); set('fa3', gg * gg * a1); set('fk', k);
+    set('ic1', 0); set('ic2', 0);
+    set('gsend', r.gsend);
+    if (r.gsend > 0) {
+      // Open the gate at this hit: ~150 ms, a touch longer for a louder hit
+      this.gateOpenAt = this.chunkOffset;
+      this.pendingHold = Math.floor((0.13 + 0.05 * Math.min(1, vel)) * sr);
+    }
+  }
+
+  // ---------- Sweep ----------
+
+  /** Take a track's new satellite list (called as the beam passes north). Each event's firing
+   *  phase is its bearing, pulled toward the nearest of 16 grid slots by `quantize`; with swing,
+   *  the odd slots sit a little late. */
+  adopt(t) {
+    const E = OD.MAX_EVENTS, G = OD.GRID_SLOTS;
+    const q = Math.max(0, Math.min(1, this.g.quantize));
+    const sw = Math.max(0, Math.min(0.4, this.g.swing));
+    const n = Math.max(0, Math.min(E, this.eCount[t]));
+    for (let e = 0; e < n; e++) {
+      const i = t * E + e;
+      const a = Math.max(0, Math.min(1, this.ePhase[i]));
+      const slot = Math.round(a * G);          // (Swift's .rounded() is half away from zero; a >= 0)
+      const grid = (slot + (slot % 2 === 1 ? sw : 0)) / G;
+      let f = a + q * (grid - a);
+      if (f >= 1) f -= 1;
+      this.phase[i] = Math.max(0, f);
+      this.vel[i] = this.pVel[i]; this.pan[i] = this.pPan[i]; this.freq[i] = this.pFreq[i];
+    }
+    this.count[t] = n;
+    this.gen[t] = this.pGen[t];
+  }
+
+  /** Fire every event whose phase falls in [a, b). */
+  fire(a, b) {
+    const E = OD.MAX_EVENTS;
+    for (let t = 0; t < OD.TRACKS; t++) {
+      if (this.mute[t] >= 0.5) continue;
+      const kind = t === 0 ? 'kick' : t === 1 ? 'rim' : t === 2 ? 'hat' : 'gatedHat';
+      for (let e = 0; e < this.count[t]; e++) {
+        const i = t * E + e;
+        const ph = this.phase[i];
+        if (!(ph >= a && ph < b)) continue;
+        this.trigger(kind, this.freq[i], this.vel[i] * this.level[t], this.pan[i], this.bright[t]);
+      }
+    }
+  }
+
+  /** Pings and the gong are triggered by the main thread at any moment. */
+  events() {
+    while (this.pingQueue.length) {
+      const [f, v, p] = this.pingQueue.shift();
+      this.trigger('ping', f, v, p, 0.5);
+    }
+    while (this.gongQueue.length) {
+      const [f, v, p] = this.gongQueue.shift();
+      this.trigger('gong', f, v, p, 0.5);
+    }
+  }
+
+  // ---------- Render: voices ----------
+
+  renderVoices(L, R, o, m) {
+    const V = OD.VOICES, vs = this.vs, sendL = this.sendL, sendR = this.sendR, gateIn = this.gateIn;
+    for (let v = 0; v < V; v++) {
+      if (vs[VS.on * V + v] <= 0.5) continue;
+      const at = k => VS[k] * V + v;
+      let age = vs[at('age')];
+      const atk = vs[at('atk')], amp = vs[at('amp')];
+      const gl = vs[at('gl')] * amp, gr = vs[at('gr')] * amp;
+      const snd = vs[at('send')];
+      let ph1 = vs[at('ph1')], ph2 = vs[at('ph2')], ph3 = vs[at('ph3')];
+      const inc1 = vs[at('inc1')], inc2 = vs[at('inc2')], inc3 = vs[at('inc3')];
+      let g1 = vs[at('g1')], g2 = vs[at('g2')], g3 = vs[at('g3')];
+      const m1 = vs[at('m1')], m2 = vs[at('m2')], m3 = vs[at('m3')];
+      let penv = vs[at('penv')];
+      const pmul = vs[at('pmul')], pdepth = vs[at('pdepth')];
+      let na = vs[at('na')];
+      const nmul = vs[at('nmul')], hp = vs[at('hp')] > 0.5;
+      const fa1 = vs[at('fa1')], fa2 = vs[at('fa2')], fa3 = vs[at('fa3')], fk = vs[at('fk')];
+      let ic1 = vs[at('ic1')], ic2 = vs[at('ic2')];
+      const gs = vs[at('gsend')] * amp * 0.7;
+      const noisy = na > 1e-5;
+      for (let i = o; i < o + m; i++) {
+        const pm = 1 + pdepth * penv;
+        penv *= pmul;
+        let x = g1 * this.sn(ph1) + g2 * this.sn(ph2) + g3 * this.sn(ph3);
+        ph1 += inc1 * pm; if (ph1 >= 1) ph1 -= Math.floor(ph1);
+        ph2 += inc2 * pm; if (ph2 >= 1) ph2 -= Math.floor(ph2);
+        ph3 += inc3 * pm; if (ph3 >= 1) ph3 -= Math.floor(ph3);
+        g1 *= m1; g2 *= m2; g3 *= m3;
+        if (noisy) {
+          const w = this.white();
+          const v3 = w - ic2;
+          const v1 = fa1 * ic1 + fa2 * v3;
+          const v2 = ic2 + fa2 * ic1 + fa3 * v3;
+          ic1 = 2 * v1 - ic1;
+          ic2 = 2 * v2 - ic2;
+          x += (hp ? (w - fk * v1 - v2) : v1) * na;
+          na *= nmul;
+        }
+        const env = age < atk ? age / atk : 1;
+        age += 1;
+        const y = x * env;
+        L[i] += y * gl;
+        R[i] += y * gr;
+        sendL[i] += y * gl * snd;
+        sendR[i] += y * gr * snd;
+        if (gs > 0) gateIn[i] += y * gs;
+      }
+      vs[at('age')] = age;
+      vs[at('ph1')] = ph1; vs[at('ph2')] = ph2; vs[at('ph3')] = ph3;
+      vs[at('g1')] = g1; vs[at('g2')] = g2; vs[at('g3')] = g3;
+      vs[at('penv')] = penv; vs[at('na')] = na;
+      vs[at('ic1')] = Math.abs(ic1) < 1e-15 ? 0 : ic1;
+      vs[at('ic2')] = Math.abs(ic2) < 1e-15 ? 0 : ic2;
+      if (age > atk && g1 + g2 + g3 + na < 1e-4) vs[at('on')] = 0;
+    }
+  }
+
+  // ---------- Render: the gated reverb ----------
+
+  /** A dense, bright room (Freeverb-style combs and allpasses), heard only through a gate that a
+   *  BELT hit throws open and that slams shut ~150 ms later, cutting the tail dead. */
+  renderGate(L, R, n) {
+    const sr = this.sr;
+    const fbk = 0.86, damp = 0.22;
+    const release = Math.exp(-1 / (0.006 * sr));
+    const attack = 1 - Math.exp(-1 / (0.0015 * sr));
+    const wet = 1.0;
+    const C = this.combCap, A = this.apCap;
+    const combBuf = this.combBuf, combLP = this.combLP, combIdx = this.combIdx, combLen = this.combLen;
+    const apBuf = this.apBuf, apIdx = this.apIdx, apLen = this.apLen;
+    const gateIn = this.gateIn, sendL = this.sendL, sendR = this.sendR;
+    for (let i = 0; i < n; i++) {
+      if (i === this.gateOpenAt) this.gateHold = Math.max(this.gateHold, this.pendingHold);
+      if (this.gateHold > 0) {
+        this.gateHold -= 1;
+        this.gateEnv += (1 - this.gateEnv) * attack;
+      } else {
+        this.gateEnv *= release;
+      }
+      const x = gateIn[i] * 0.2;
+      let outL = 0, outR = 0;
+      for (let c = 0; c < 8; c++) {
+        const base = c * C;
+        const j = combIdx[c];
+        const y = combBuf[base + j];
+        combLP[c] = y * (1 - damp) + combLP[c] * damp;
+        combBuf[base + j] = x + combLP[c] * fbk;
+        combIdx[c] = j + 1 >= combLen[c] ? 0 : j + 1;
+        if (c < 4) outL += y; else outR += y;
+      }
+      for (let a = 0; a < 4; a++) {
+        const base = a * A;
+        const j = apIdx[a];
+        const b = apBuf[base + j];
+        const inp = a < 2 ? outL : outR;
+        const o = b - inp;
+        apBuf[base + j] = inp + b * 0.5;
+        apIdx[a] = j + 1 >= apLen[a] ? 0 : j + 1;
+        if (a < 2) outL = o; else outR = o;
+      }
+      const g = this.gateEnv * wet;
+      L[i] += outL * g;
+      R[i] += outR * g;
+      // A little of the gated room reaches the dub echo too
+      sendL[i] += outL * g * 0.2;
+      sendR[i] += outR * g * 0.2;
+    }
+    this.gateOpenAt = -1;
+    for (let c = 0; c < 8; c++) if (Math.abs(combLP[c]) < 1e-15) combLP[c] = 0;
+    if (this.gateEnv < 1e-6) this.gateEnv = 0;
+  }
+
+  // ---------- Render: the dub delay and dust ----------
+
+  readDelay(buf, d) {
+    let r = this.dlW - d;
+    const cap = this.dlCap;
+    while (r < 0) r += cap;
+    const i = Math.floor(r);
+    const f = r - i;
+    const a = buf[i % cap], b = buf[(i + 1) % cap];
+    return a + (b - a) * f;
+  }
+
+  renderDub(L, R, n) {
+    const sr = this.sr, p = this.g;
+    const bt = n / sr;
+    // Dotted eighth; the time glides (pitching the echoes a little, like tape) when tempo moves
+    const target = Math.min(this.dlCap - 4, 60 / Math.max(30, this.bpm) * 0.75 * sr);
+    this.dlTime += (target - this.dlTime) * (1 - Math.exp(-bt / 1.2));
+    const thr = Math.max(0, Math.min(1, p.throwAmt));
+    const fbT = Math.min(0.93, Math.max(0, p.dub) + 0.28 * thr);
+    const inT = 0.5 + 0.9 * thr;
+    const fb0 = this.fb, in0 = this.inGain;
+    this.fb += (fbT - this.fb) * (1 - Math.exp(-bt / 0.25));
+    this.inGain += (inT - this.inGain) * (1 - Math.exp(-bt / 0.05));
+    const fbInc = (this.fb - fb0) / n, inInc = (this.inGain - in0) / n;
+    this.reverbSend += (p.reverbSend - this.reverbSend) * (1 - Math.exp(-bt / 0.5));
+    const hpA = 1 - Math.exp(-2 * Math.PI * 220 / sr);
+    const lpA = 1 - Math.exp(-2 * Math.PI * 2600 / sr);
+    const wowInc = 0.33 / sr;
+    let f = fb0, g = in0;
+    const dWet = 0.8;
+    const { dlL, dlR, sendL, sendR, verbL, verbR } = this;
+    const rs = this.reverbSend;
+    let hpL = this.hpL, hpR = this.hpR, lpL = this.lpL, lpR = this.lpR;
+    for (let i = 0; i < n; i++) {
+      f += fbInc; g += inInc;
+      this.wowPh += wowInc; if (this.wowPh >= 1) this.wowPh -= 1;
+      const d = this.dlTime * (1 + 0.0018 * this.sn(this.wowPh));
+      const yL = this.readDelay(dlL, d), yR = this.readDelay(dlR, d);
+      // Ping-pong: the input enters left, each side feeds the other
+      const inp = (sendL[i] + sendR[i]) * 0.5 * g;
+      let xL = inp + f * yR;
+      let xR = f * yL;
+      // Band-limit and saturate the loop so repeats get darker and rounder
+      hpL += (xL - hpL) * hpA; xL -= hpL;
+      hpR += (xR - hpR) * hpA; xR -= hpR;
+      lpL += (xL - lpL) * lpA;
+      lpR += (xR - lpR) * lpA;
+      dlL[this.dlW] = Math.tanh(lpL * 1.3) / 1.3;
+      dlR[this.dlW] = Math.tanh(lpR * 1.3) / 1.3;
+      this.dlW += 1; if (this.dlW >= this.dlCap) this.dlW = 0;
+      L[i] += yL * dWet;
+      R[i] += yR * dWet;
+      verbL[i] = (sendL[i] * 0.35 + yL * 0.55) * rs;
+      verbR[i] = (sendR[i] * 0.35 + yR * 0.55) * rs;
+    }
+    this.hpL = Math.abs(hpL) < 1e-15 ? 0 : hpL; this.hpR = Math.abs(hpR) < 1e-15 ? 0 : hpR;
+    this.lpL = Math.abs(lpL) < 1e-15 ? 0 : lpL; this.lpR = Math.abs(lpR) < 1e-15 ? 0 : lpR;
+
+    // Dust: a breath of hiss and the odd crackle, more of it the busier the sky
+    this.dust += (p.dust - this.dust) * (1 - Math.exp(-bt / 2));
+    if (this.dust > 1e-4) {
+      const hissG = 0.0035 * this.dust;
+      const rate = (2 + 10 * this.dust) / sr;
+      const hA = 1 - Math.exp(-2 * Math.PI * 4500 / sr);
+      for (let i = 0; i < n; i++) {
+        this.hissL += (this.white() - this.hissL) * hA;
+        this.hissR += (this.white() - this.hissR) * hA;
+        if (this.rand01() < rate) this.crackle = (this.white() > 0 ? 1 : -1) * (0.01 + 0.03 * this.rand01()) * this.dust;
+        const c = this.crackle;
+        this.crackle *= 0.55;
+        L[i] += this.hissL * hissG + c;
+        R[i] += this.hissR * hissG + c * 0.7;
+      }
+    }
+  }
+
+  // ---------- Render ----------
+
+  /** Render n frames: the dry bus (with echoes) into L/R and the plate send into VL/VR. */
+  render(n0, L, R, VL, VR) {
+    if (n0 <= 0) return;
+    const n = Math.min(n0, OD.MAX_FRAMES);
+    L.fill(0, 0, n0); R.fill(0, 0, n0);
+    this.sendL.fill(0, 0, n); this.sendR.fill(0, 0, n); this.gateIn.fill(0, 0, n);
+    const sr = this.sr, p = this.g;
+    const bt = n / sr;
+    this.bpm += (p.bpm - this.bpm) * (1 - Math.exp(-bt / 0.4));
+
+    // Transport: the sweep starts at north
+    const wantRun = p.run > 0.5;
+    if (wantRun && !this.running) {
+      this.running = true;
+      this.sweep = 0;
+      this.beats = 0;
+      for (let t = 0; t < OD.TRACKS; t++) this.adopt(t);
+    } else if (!wantRun && this.running) {
+      this.running = false;
+    }
+
+    // One revolution per bar (sixteenths grid) or per two bars (eighths grid)
+    const sweepBeats = p.division > 3 ? 4 : 8;
+    const perSample = Math.max(30, this.bpm) / 60 / sweepBeats / sr;
+    let o = 0;
+    while (o < n) {
+      const m = Math.min(32, n - o);
+      this.chunkOffset = o;
+      this.events();
+      if (this.running) {
+        const a = this.sweep;
+        let b = a + perSample * m;
+        this.fire(a, Math.min(b, 1));
+        if (b >= 1) {
+          b -= 1;
+          for (let t = 0; t < OD.TRACKS; t++) if (this.pGen[t] !== this.gen[t]) this.adopt(t);
+          this.fire(0, b);
+        }
+        this.sweep = b;
+        this.beats += perSample * m * sweepBeats;
+      }
+      this.renderVoices(L, R, o, m);
+      o += m;
+    }
+
+    this.renderGate(L, R, n);
+    this.renderDub(L, R, n);
+
+    // Master: soft clip the dry bus; the plate send takes the same gain
+    const m0 = this.masterG;
+    this.masterG += (p.master - this.masterG) * (1 - Math.exp(-bt / 0.6));
+    const mInc = (this.masterG - m0) / n;
+    let mg = m0;
+    const { verbL, verbR } = this;
+    for (let i = 0; i < n; i++) {
+      mg += mInc;
+      L[i] = Math.tanh(L[i] * mg);
+      R[i] = Math.tanh(R[i] * mg);
+      VL[i] = verbL[i] * mg;
+      VR[i] = verbR[i] * mg;
+    }
+  }
+}
+
+if (typeof module !== 'undefined') module.exports = { OrbitDSP, OD };
+
+/* Runs inside the AudioWorklet, after dsp.js (OrbitDSP) in the same module. */
+class OrbitProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.dsp = new OrbitDSP(sampleRate);
+    this.k = 0;
+    this.port.onmessage = (e) => {
+      const m = e.data, d = this.dsp;
+      switch (m.type) {
+        case 'set': d.setParam(m.k, m.v); break;
+        case 'list': d.setList(m.t, m); break;
+        case 'mute': d.setMute(m.t, m.v); break;
+        case 'bright': d.setBright(m.t, m.v); break;
+        case 'ping': d.ping(m.f, m.v, m.p); break;
+        case 'gong': d.gong(m.f, m.v, m.p); break;
+      }
+    };
+  }
+
+  process(inputs, outputs) {
+    const dry = outputs[0], send = outputs[1];
+    if (!dry || dry.length < 2 || !send || send.length < 2) return true;
+    const n = dry[0].length;
+    this.dsp.render(n, dry[0], dry[1], send[0], send[1]);
+    // Tell the page where the beam is, about every 20 ms
+    if ((this.k++ & 7) === 0) {
+      this.port.postMessage({ s: this.dsp.sweep, b: this.dsp.beats, r: this.dsp.running, t: currentTime });
+    }
+    return true;
+  }
+}
+registerProcessor('orbitakt', OrbitProcessor);
+</script>
+<script>
+/* sgp4.js */
+'use strict';
+/* SGP4 satellite propagation: a line-for-line port of Orbitakt's SGP4.swift (Vallado's SGP4,
+ * WGS-72 constants, "improved" mode, near-Earth). High orbits (period >= 225 min) run
+ * through the same equations without SDP4's lunar-solar terms, which stays within about
+ * 0.04 degrees of the full model as seen from Earth for near-circular orbits. */
+
+const SGP4_MU = 398600.8;
+const SGP4_RE = 6378.135;
+const SGP4_XKE = 60.0 / Math.sqrt((SGP4_RE * SGP4_RE * SGP4_RE) / SGP4_MU);
+const SGP4_J2 = 0.001082616;
+const SGP4_J3 = -0.00000253881;
+const SGP4_J4 = -0.00000165597;
+const SGP4_J3OJ2 = SGP4_J3 / SGP4_J2;
+const TWO_PI = 2 * Math.PI;
+const X2O3 = 2.0 / 3.0;
+
+class SGP4 {
+  /** Angles in radians, meanMotion in radians per minute (Kozai, as in the TLE). */
+  constructor(epoch, bstar, ecc, incl, node, argp, meanAnomaly, noKozai) {
+    const re = SGP4_RE, xke = SGP4_XKE, j2 = SGP4_J2, j4 = SGP4_J4, j3oj2 = SGP4_J3OJ2;
+    this.epoch = epoch;
+    this.bstar = bstar;
+    this.ecco = ecc;
+    this.inclo = incl;
+    this.nodeo = node;
+    this.argpo = argp;
+    this.mo = meanAnomaly;
+    this.eccentricity = ecc;
+    this.inclination = incl;
+
+    // initl: recover the original mean motion and semi-major axis
+    const eccsq = ecc * ecc;
+    const omeosq = 1 - eccsq;
+    const rteosq = Math.sqrt(omeosq);
+    const cosio = Math.cos(incl);
+    const cosio2 = cosio * cosio;
+    const ak = Math.pow(xke / noKozai, X2O3);
+    const d1 = 0.75 * j2 * (3 * cosio2 - 1) / (rteosq * omeosq);
+    let del = d1 / (ak * ak);
+    const adel = ak * (1 - del * del - del * (1.0 / 3.0 + 134 * del * del / 81));
+    del = d1 / (adel * adel);
+    const no = noKozai / (1 + del);
+    const ao = Math.pow(xke / no, X2O3);
+    const sinio = Math.sin(incl);
+    const po = ao * omeosq;
+    const con42 = 1 - 5 * cosio2;
+    const con41 = -con42 - cosio2 - cosio2;
+    const posq = po * po;
+    const rp = ao * (1 - ecc);
+    this.no = no;
+    this.cosio = cosio;
+    this.sinio = sinio;
+    this.con41 = con41;
+    this.periodMinutes = TWO_PI / no;
+
+    // sgp4init (near-Earth)
+    const ss = 78.0 / re + 1;
+    const qzms2t = Math.pow((120.0 - 78.0) / re, 4);
+    // Low perigee, or a deep-space orbit (as the reference does): skip the higher drag terms
+    const simple = rp < (220.0 / re + 1) || TWO_PI / no >= 225;
+    this.isimp = simple;
+    let sfour = ss;
+    let qzms24 = qzms2t;
+    const perige = (rp - 1) * re;
+    if (perige < 156) {
+      sfour = perige - 78;
+      if (perige < 98) sfour = 20;
+      qzms24 = Math.pow((120 - sfour) / re, 4);
+      sfour = sfour / re + 1;
+    }
+    const pinvsq = 1 / posq;
+    const tsi = 1 / (ao - sfour);
+    const eta = ao * ecc * tsi;
+    const etasq = eta * eta;
+    const eeta = ecc * eta;
+    const psisq = Math.abs(1 - etasq);
+    const coef = qzms24 * Math.pow(tsi, 4);
+    const coef1 = coef / Math.pow(psisq, 3.5);
+    const cc2 = coef1 * no * (ao * (1 + 1.5 * etasq + eeta * (4 + etasq))
+      + 0.375 * j2 * tsi / psisq * con41 * (8 + 3 * etasq * (8 + etasq)));
+    const cc1 = bstar * cc2;
+    let cc3 = 0;
+    if (ecc > 1e-4) cc3 = -2 * coef * tsi * j3oj2 * no * sinio / ecc;
+    const x1mth2 = 1 - cosio2;
+    const cc4a = eta * (2 + 0.5 * etasq) + ecc * (0.5 + 2 * etasq);
+    const cc4b = -3 * con41 * (1 - 2 * eeta + etasq * (1.5 - 0.5 * eeta));
+    const cc4c = 0.75 * x1mth2 * (2 * etasq - eeta * (1 + etasq)) * Math.cos(2 * argp);
+    const cc4 = 2 * no * coef1 * ao * omeosq * (cc4a - j2 * tsi / (ao * psisq) * (cc4b + cc4c));
+    const cc5 = 2 * coef1 * ao * omeosq * (1 + 2.75 * (etasq + eeta) + eeta * etasq);
+    const cosio4 = cosio2 * cosio2;
+    const temp1 = 1.5 * j2 * pinvsq * no;
+    const temp2 = 0.5 * temp1 * j2 * pinvsq;
+    const temp3 = -0.46875 * j4 * pinvsq * pinvsq * no;
+    this.mdot = no + 0.5 * temp1 * rteosq * con41
+      + 0.0625 * temp2 * rteosq * (13 - 78 * cosio2 + 137 * cosio4);
+    this.argpdot = -0.5 * temp1 * con42 + 0.0625 * temp2 * (7 - 114 * cosio2 + 395 * cosio4)
+      + temp3 * (3 - 36 * cosio2 + 49 * cosio4);
+    const xhdot1 = -temp1 * cosio;
+    this.nodedot = xhdot1 + (0.5 * temp2 * (4 - 19 * cosio2) + 2 * temp3 * (3 - 7 * cosio2)) * cosio;
+    this.omgcof = bstar * cc3 * Math.cos(argp);
+    this.xmcof = ecc > 1e-4 ? -X2O3 * coef * bstar / eeta : 0;
+    this.nodecf = 3.5 * omeosq * xhdot1 * cc1;
+    this.t2cof = 1.5 * cc1;
+    if (Math.abs(cosio + 1) > 1.5e-12) {
+      this.xlcof = -0.25 * j3oj2 * sinio * (3 + 5 * cosio) / (1 + cosio);
+    } else {
+      this.xlcof = -0.25 * j3oj2 * sinio * (3 + 5 * cosio) / 1.5e-12;
+    }
+    this.aycof = -0.5 * j3oj2 * sinio;
+    const dm = 1 + eta * Math.cos(meanAnomaly);
+    this.delmo = dm * dm * dm;
+    this.sinmao = Math.sin(meanAnomaly);
+    this.x7thm1 = 7 * cosio2 - 1;
+    this.x1mth2 = x1mth2;
+    this.cc1 = cc1;
+    this.cc4 = cc4;
+    this.cc5 = cc5;
+    this.eta = eta;
+    if (!simple) {
+      const cc1sq = cc1 * cc1;
+      const d2 = 4 * ao * tsi * cc1sq;
+      const temp = d2 * tsi * cc1 / 3;
+      const d3 = (17 * ao + sfour) * temp;
+      const d4 = 0.5 * temp * ao * tsi * (221 * ao + 31 * sfour) * cc1;
+      this.d2 = d2; this.d3 = d3; this.d4 = d4;
+      this.t3cof = d2 + 2 * cc1sq;
+      this.t4cof = 0.25 * (3 * d3 + cc1 * (12 * d2 + 10 * cc1sq));
+      this.t5cof = 0.2 * (3 * d4 + 12 * cc1 * d3 + 6 * d2 * d2 + 15 * cc1sq * (2 * d2 + cc1sq));
+    } else {
+      this.d2 = 0; this.d3 = 0; this.d4 = 0; this.t3cof = 0; this.t4cof = 0; this.t5cof = 0;
+    }
+  }
+
+  /** Usable for sky positions: near-Earth, or a high orbit that is close to circular. */
+  get isUsable() { return this.periodMinutes < 225 || this.eccentricity < 0.1; }
+
+  /** Position in the TEME frame (km) at `t` minutes after epoch, written into out[0..2].
+   *  Returns false if the model fails (decayed, or elements too old to mean anything). */
+  positionMinutes(t, out) {
+    const xmdf = this.mo + this.mdot * t;
+    const argpdf = this.argpo + this.argpdot * t;
+    const nodedf = this.nodeo + this.nodedot * t;
+    let argpm = argpdf;
+    let mm = xmdf;
+    const t2 = t * t;
+    let nodem = nodedf + this.nodecf * t2;
+    let tempa = 1 - this.cc1 * t;
+    let tempe = this.bstar * this.cc4 * t;
+    let templ = this.t2cof * t2;
+    if (!this.isimp) {
+      const delomg = this.omgcof * t;
+      const dm = 1 + this.eta * Math.cos(xmdf);
+      const delm = this.xmcof * (dm * dm * dm - this.delmo);
+      const temp = delomg + delm;
+      mm = xmdf + temp;
+      argpm = argpdf - temp;
+      const t3 = t2 * t;
+      const t4 = t3 * t;
+      tempa = tempa - this.d2 * t2 - this.d3 * t3 - this.d4 * t4;
+      tempe = tempe + this.bstar * this.cc5 * (Math.sin(mm) - this.sinmao);
+      templ = templ + this.t3cof * t3 + t4 * (this.t4cof + t * this.t5cof);
+    }
+    if (!(this.no > 0)) return false;
+    const am = Math.pow(SGP4_XKE / this.no, X2O3) * tempa * tempa;
+    let em = this.ecco - tempe;
+    if (!(em < 1 && em >= -0.001 && am >= 0.95)) return false;
+    if (em < 1e-6) em = 1e-6;
+    mm = mm + this.no * templ;
+    let xlm = mm + argpm + nodem;
+    nodem = nodem % TWO_PI;
+    argpm = argpm % TWO_PI;
+    xlm = xlm % TWO_PI;
+    mm = (xlm - argpm - nodem) % TWO_PI;
+
+    // Long-period periodics
+    const axnl = em * Math.cos(argpm);
+    let temp = 1 / (am * (1 - em * em));
+    const aynl = em * Math.sin(argpm) + temp * this.aycof;
+    const xl = mm + argpm + nodem + temp * this.xlcof * axnl;
+
+    // Kepler's equation
+    const u = (xl - nodem) % TWO_PI;
+    let eo1 = u;
+    let tem5 = 9999.9;
+    let ktr = 1;
+    let sineo1 = 0, coseo1 = 0;
+    while (Math.abs(tem5) >= 1e-12 && ktr <= 10) {
+      sineo1 = Math.sin(eo1);
+      coseo1 = Math.cos(eo1);
+      tem5 = 1 - coseo1 * axnl - sineo1 * aynl;
+      tem5 = (u - aynl * coseo1 + axnl * sineo1 - eo1) / tem5;
+      if (Math.abs(tem5) >= 0.95) tem5 = tem5 > 0 ? 0.95 : -0.95;
+      eo1 += tem5;
+      ktr += 1;
+    }
+
+    // Short-period periodics
+    const ecose = axnl * coseo1 + aynl * sineo1;
+    const esine = axnl * sineo1 - aynl * coseo1;
+    const el2 = axnl * axnl + aynl * aynl;
+    const pl = am * (1 - el2);
+    if (!(pl >= 0)) return false;
+    const rl = am * (1 - ecose);
+    const betal = Math.sqrt(1 - el2);
+    temp = esine / (1 + betal);
+    const sinu = am / rl * (sineo1 - aynl - axnl * temp);
+    const cosu = am / rl * (coseo1 - axnl + aynl * temp);
+    let su = Math.atan2(sinu, cosu);
+    const sin2u = (cosu + cosu) * sinu;
+    const cos2u = 1 - 2 * sinu * sinu;
+    temp = 1 / pl;
+    const temp1 = 0.5 * SGP4_J2 * temp;
+    const temp2 = temp1 * temp;
+    const mrt = rl * (1 - 1.5 * temp2 * betal * this.con41) + 0.5 * temp1 * this.x1mth2 * cos2u;
+    su = su - 0.25 * temp2 * this.x7thm1 * sin2u;
+    const xnode = nodem + 1.5 * temp2 * this.cosio * sin2u;
+    const xinc = this.inclo + 1.5 * temp2 * this.cosio * this.sinio * cos2u;
+    if (!(mrt >= 1)) return false;
+
+    const sinsu = Math.sin(su), cossu = Math.cos(su);
+    const snod = Math.sin(xnode), cnod = Math.cos(xnode);
+    const sini = Math.sin(xinc), cosi = Math.cos(xinc);
+    const xmx = -snod * cosi;
+    const xmy = cnod * cosi;
+    const r = mrt * SGP4_RE;
+    out[0] = r * (xmx * sinsu + cnod * cossu);
+    out[1] = r * (xmy * sinsu + snod * cossu);
+    out[2] = r * (sini * sinsu);
+    return true;
+  }
+
+  /** Same, at a Unix time in seconds. */
+  position(unix, out) { return this.positionMinutes((unix - this.epoch) / 60, out); }
+
+  /** Parse the two element lines of a TLE (the name line is handled by the caller). */
+  static fromLines(l1, l2) {
+    if (l1.length < 63 || l2.length < 63 || l1[0] !== '1' || l2[0] !== '2') return null;
+    const field = (s, lo, hi) => s.slice(lo, Math.min(hi, s.length)).trim();
+    const num = (s, lo, hi) => {
+      const f = field(s, lo, hi);
+      if (f === '') return NaN;
+      const v = Number(f);
+      return Number.isFinite(v) ? v : NaN;
+    };
+    // TLE "assumed decimal" exponent field, e.g. " 12345-3" = 0.12345e-3.
+    const expo = (s, lo, hi) => {
+      let f = field(s, lo, hi);
+      if (f === '') return 0;
+      let sign = 1;
+      if (f[0] === '-') { sign = -1; f = f.slice(1); } else if (f[0] === '+') { f = f.slice(1); }
+      if (f.length < 3) return 0;
+      const mant = f.slice(0, -2);
+      const ex = f.slice(-2);
+      const m = Number('0.' + mant), e = Number(ex);
+      if (!Number.isFinite(m) || !Number.isFinite(e)) return NaN;
+      return sign * m * Math.pow(10, e);
+    };
+    const yy = parseInt(field(l1, 18, 20), 10);
+    const doy = num(l1, 20, 32);
+    const bstar = expo(l1, 53, 61);
+    const incl = num(l2, 8, 16), node = num(l2, 17, 25);
+    const ecc = Number('0.' + field(l2, 26, 33));
+    const argp = num(l2, 34, 42), ma = num(l2, 43, 51), n = num(l2, 52, 63);
+    if ([yy, doy, bstar, incl, node, ecc, argp, ma, n].some(v => !Number.isFinite(v)) || !(n > 0)) return null;
+    const year = yy < 57 ? 2000 + yy : 1900 + yy;
+    const deg = Math.PI / 180;
+    const epoch = Date.UTC(year, 0, 1) / 1000 + (doy - 1) * 86400;
+    return new SGP4(epoch, bstar, ecc, incl * deg, node * deg, argp * deg, ma * deg, n * 2 * Math.PI / 1440);
+  }
+}
+
+/** An observer on the WGS-84 ellipsoid, with the rotation to local east/north/up. */
+class Observer {
+  constructor(latDeg, lonDeg, heightKm = 0) {
+    const a = 6378.137, f = 1 / 298.257223563;
+    const e2 = f * (2 - f);
+    const phi = latDeg * Math.PI / 180, lam = lonDeg * Math.PI / 180;
+    this.sphi = Math.sin(phi); this.cphi = Math.cos(phi);
+    this.slam = Math.sin(lam); this.clam = Math.cos(lam);
+    const n = a / Math.sqrt(1 - e2 * this.sphi * this.sphi);
+    this.x = (n + heightKm) * this.cphi * this.clam;
+    this.y = (n + heightKm) * this.cphi * this.slam;
+    this.z = (n * (1 - e2) + heightKm) * this.sphi;
+  }
+
+  /** Azimuth (degrees clockwise from north, 0..<360) and elevation (degrees) of a TEME
+   *  position r = [x,y,z], given Greenwich mean sidereal time (radians). Written into out. */
+  look(r, gmst, out) {
+    const cg = Math.cos(gmst), sg = Math.sin(gmst);
+    const ex = cg * r[0] + sg * r[1];
+    const ey = -sg * r[0] + cg * r[1];
+    const dx = ex - this.x, dy = ey - this.y, dz = r[2] - this.z;
+    const e = -this.slam * dx + this.clam * dy;
+    const n = -this.sphi * this.clam * dx - this.sphi * this.slam * dy + this.cphi * dz;
+    const u = this.cphi * this.clam * dx + this.cphi * this.slam * dy + this.sphi * dz;
+    out[1] = Math.atan2(u, Math.sqrt(e * e + n * n)) * 180 / Math.PI;
+    let az = Math.atan2(e, n) * 180 / Math.PI;
+    if (az < 0) az += 360;
+    out[0] = az;
+  }
+}
+
+/** Greenwich mean sidereal time (IAU-82, radians) for a Unix time, taking UT1 ~ UTC. */
+function gmstFromUnix(unix) {
+  const jd = unix / 86400 + 2440587.5;
+  const t = (jd - 2451545) / 36525;
+  let s = -6.2e-6 * t * t * t + 0.093104 * t * t
+    + (876600 * 3600 + 8640184.812866) * t + 67310.54841;
+  s = (s * Math.PI / 180 / 240) % TWO_PI;
+  return s < 0 ? s + TWO_PI : s;
+}
+
+if (typeof module !== 'undefined') module.exports = { SGP4, Observer, gmstFromUnix };
+
+/* catalog.js */
+'use strict';
+/* The satellite catalog: families, the real catalog (CelesTrak TLEs) and a simulated stand-in.
+ * Port of Orbitakt's Catalog.swift. */
+
+// Which part of the sky a satellite belongs to. Each family drives one part of the kit.
+const FAM = { NAV: 0, LEO: 1, SWARM: 2, BELT: 3, CREW: 4, OTHER: 5 };
+const FAM_LABEL = ['NAV', 'LEO', 'SWARM', 'BELT', 'CREW', 'OTHER'];
+
+/** Sort a catalog entry into a family by name and orbit. */
+function classify(name, periodMinutes, eccentricity) {
+  const n = name.toUpperCase();
+  if (n.includes('ISS (ZARYA)') || n.includes('TIANHE')) return FAM.CREW;
+  if (n.startsWith('STARLINK')) return FAM.SWARM;
+  if (periodMinutes < 225) return FAM.LEO;
+  if (!(eccentricity < 0.1)) return FAM.OTHER;
+  if (periodMinutes < 1300) return FAM.NAV;
+  if (periodMinutes <= 1600) return FAM.BELT;
+  return FAM.OTHER;
+}
+
+/** A circular orbit with J2 nodal drift, for the simulated sky. */
+class CircularOrbit {
+  constructor(altitudeKm, inclinationDeg, raan, u, epoch) {
+    const MU = 398600.4418, RE = 6378.137;
+    this.a = RE + altitudeKm;
+    this.inc = inclinationDeg * Math.PI / 180;
+    this.raan0 = raan;
+    this.u0 = u;
+    this.n = Math.sqrt(MU / (this.a * this.a * this.a));
+    const ratio = RE / this.a;
+    this.raanDot = -1.5 * this.n * 1.08262668e-3 * ratio * ratio * Math.cos(this.inc);
+    this.epoch = epoch;
+    this.cosInc = Math.cos(this.inc);
+    this.sinInc = Math.sin(this.inc);
+    this.periodMinutes = 2 * Math.PI / this.n / 60;
+  }
+  position(unix, out) {
+    const dt = unix - this.epoch;
+    const u = this.u0 + this.n * dt, o = this.raan0 + this.raanDot * dt;
+    const cu = Math.cos(u), su = Math.sin(u), co = Math.cos(o), so = Math.sin(o);
+    const ci = this.cosInc, si = this.sinInc;
+    out[0] = this.a * (cu * co - su * ci * so);
+    out[1] = this.a * (cu * so + su * ci * co);
+    out[2] = this.a * su * si;
+    return true;
+  }
+}
+
+/** NORAD catalog number, including the Alpha-5 form used past 99999 ("A0001" = 100001). */
+function catalogNumber(field) {
+  const f = field.trim();
+  if (/^\d+$/.test(f)) return parseInt(f, 10);
+  const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const i = letters.indexOf(f[0]);
+  const rest = parseInt(f.slice(1), 10);
+  if (i < 0 || !Number.isFinite(rest)) return -1;
+  return (10 + i) * 10000 + rest;
+}
+
+/** Parse 3-line TLE text (name, line 1, line 2) into satellites {id, name, fam, orbit}. */
+function parseTLE(text) {
+  const out = [];
+  const lines = text.split(/\r?\n/);
+  let i = 0;
+  while (i + 1 < lines.length) {
+    const l1 = lines[i], l2 = lines[i + 1];
+    if (!l1.startsWith('1 ') || !l2.startsWith('2 ')) { i += 1; continue; }
+    let name = '';
+    if (i > 0) {
+      const prev = lines[i - 1];
+      if (!prev.startsWith('1 ') && !prev.startsWith('2 ')) {
+        name = prev.trim();
+        if (name.startsWith('0 ')) name = name.slice(2);
+      }
+    }
+    i += 2;
+    const s = SGP4.fromLines(l1, l2);
+    if (!s || !s.isUsable) continue;
+    const id = catalogNumber(l1.slice(2, 7));
+    out.push({ id, name, fam: classify(name, s.periodMinutes, s.eccentricity), orbit: s });
+  }
+  return out;
+}
+
+/** Small deterministic generator (so the simulated sky is the same every visit). */
+function makeRng(seed) {
+  let a = seed >>> 0;
+  return () => {   // mulberry32
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** A stand-in sky, used before the real catalog arrives or with no connection: the same
+ *  constellations, shell by shell, as Walker patterns (Starlink's shells, OneWeb, Iridium,
+ *  Kuiper, the navigation constellations, the geostationary belt, two crewed stations, and a
+ *  scatter of other low orbits). Positions are invented; densities are realistic. */
+function simulatedCatalog() {
+  const rng = makeRng(0x0B17A472);
+  const epoch = 1792195200;     // 2026-10-17 00:00 UTC
+  const out = [];
+  let nextID = 90000;
+  const add = (name, fam, alt, inc, raan, u) => {
+    out.push({ id: nextID++, name, fam, orbit: new CircularOrbit(alt, inc, raan, u, epoch) });
+  };
+  const walker = (name, fam, alt, inc, planes, perPlane, phasing) => {
+    const off = rng() * 2 * Math.PI;
+    for (let j = 0; j < planes; j++) {
+      for (let k = 0; k < perPlane; k++) {
+        const raan = off + 2 * Math.PI * j / planes;
+        const u = 2 * Math.PI * k / perPlane + 2 * Math.PI * (phasing * j) / (planes * perPlane);
+        add(name, fam, alt, inc, raan, u);
+      }
+    }
+  };
+  walker('STARLINK', FAM.SWARM, 550, 53, 72, 22, 17);
+  walker('STARLINK', FAM.SWARM, 540, 53.2, 72, 22, 13);
+  walker('STARLINK', FAM.SWARM, 570, 70, 36, 20, 11);
+  walker('STARLINK', FAM.SWARM, 560, 97.6, 10, 52, 5);
+  walker('STARLINK', FAM.SWARM, 525, 43, 28, 120, 7);
+  walker('ONEWEB', FAM.LEO, 1200, 87.9, 12, 49, 3);
+  walker('IRIDIUM', FAM.LEO, 780, 86.4, 6, 11, 2);
+  walker('KUIPER', FAM.LEO, 630, 51.9, 10, 20, 3);
+  for (let k = 0; k < 1800; k++) {
+    const r = rng();
+    let inc, alt;
+    if (r < 0.45) { inc = 97.4 + rng() * 1.2; alt = 480 + rng() * 320; }
+    else if (r < 0.6) { inc = 51.6; alt = 400 + rng() * 150; }
+    else { inc = 30 + rng() * 70; alt = 400 + rng() * 800; }
+    add('LEO', FAM.LEO, alt, inc, rng() * 2 * Math.PI, rng() * 2 * Math.PI);
+  }
+  walker('NAVSTAR', FAM.NAV, 20180, 55, 6, 5, 1);
+  walker('GALILEO', FAM.NAV, 23222, 56, 3, 8, 1);
+  walker('GLONASS', FAM.NAV, 19130, 64.8, 3, 8, 1);
+  walker('BEIDOU', FAM.NAV, 21528, 55, 3, 8, 1);
+  for (let k = 0; k < 560; k++) {
+    add('GEO', FAM.BELT, 35786, rng() * 3, rng() * 2 * Math.PI, rng() * 2 * Math.PI);
+  }
+  add('ISS (ZARYA)', FAM.CREW, 420, 51.64, rng() * 2 * Math.PI, rng() * 2 * Math.PI);
+  add('CSS (TIANHE)', FAM.CREW, 385, 41.47, rng() * 2 * Math.PI, rng() * 2 * Math.PI);
+  return out;
+}
+
+/** The real catalog from CelesTrak ("active satellites", TLE form), cached in the browser.
+ *
+ *  CelesTrak refreshes about every two hours and allows one download per update, so this asks
+ *  at most once every 12 hours, and after any failure waits 12 hours before asking again
+ *  (CelesTrak blocks clients that retry on errors). CelesTrak sends
+ *  `access-control-allow-origin: *`, so a page can fetch it directly. */
+const CatalogStore = {
+  url: 'https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle',
+  refreshAge: 12 * 3600,
+  retryAfterFailure: 12 * 3600,
+  maxAge: 30 * 86400,   // older than this, the elements are too stale to place satellites usefully
+  keys: { text: 'orbitakt.tle', at: 'orbitakt.tleAt', next: 'orbitakt.tleNext' },
+
+  _get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  _set(k, v) { try { localStorage.setItem(k, v); return true; } catch (e) { return false; } },
+
+  fetchedAt() { const t = parseFloat(this._get(this.keys.at)); return t > 0 ? t : null; },
+
+  /** Time to ask: the copy we have is over 12 h old (or missing), and we're not backing off. */
+  shouldFetch(now = Date.now() / 1000) {
+    const f = this.fetchedAt();
+    if (f !== null && now - f < this.refreshAge) return false;
+    return now >= (parseFloat(this._get(this.keys.next)) || 0);
+  },
+
+  /** The cached text, if it exists and isn't hopelessly old. */
+  cached(now = Date.now() / 1000) {
+    const f = this.fetchedAt();
+    if (f === null || now - f > this.maxAge) return null;
+    return this._get(this.keys.text);
+  },
+
+  /** One polite download: the text on success, otherwise null. Never retries by itself. */
+  async download(now = Date.now() / 1000) {
+    this._set(this.keys.next, String(now + 600));      // offline: try again in 10 minutes
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 60000);
+    let resp;
+    try {
+      resp = await fetch(this.url, { signal: ctl.signal, cache: 'no-store' });
+    } catch (e) {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+    // A reply that isn't the data (e.g. 403, "not updated since your last download"): wait 12 h
+    this._set(this.keys.next, String(now + this.retryAfterFailure));
+    if (!resp.ok) return null;
+    let text;
+    try { text = await resp.text(); } catch (e) { return null; }
+    if (!text.includes('\n1 ')) return null;
+    this._set(this.keys.text, text);
+    this._set(this.keys.at, String(Date.now() / 1000));
+    return text;
+  },
+};
+
+if (typeof module !== 'undefined') {
+  module.exports = { FAM, FAM_LABEL, classify, CircularOrbit, catalogNumber, parseTLE, simulatedCatalog, CatalogStore };
+}
+
+/* plate.js */
+'use strict';
+/* A synthetic plate-reverb impulse response, for the browser's ConvolverNode.
+ *
+ * The iPhone app uses Apple's built-in plate preset; browsers have no such thing, so this
+ * generates one: a dense burst of decorrelated noise (a plate has no discrete early
+ * reflections) that blooms in over a few milliseconds, decays exponentially (RT60 about 2.2 s)
+ * and darkens as it goes (the top end dies first, as in a real plate). The page follows the
+ * convolver with a 320 Hz high-pass and a 6 kHz low-pass, as the iPhone app's plate return does.
+ *
+ * The level is set by PLATE_ENERGY, the energy gain of the impulse response (1 = a transient
+ * keeps its energy, spread out in time). */
+
+const PLATE = { rt60: 2.2, seconds: 2.8, energy: 2.0, bloom: 0.004, brightHz: 16000, darkHz: 2800, seed: 0x51A7E };
+
+function makePlateIR(sampleRate, opts) {
+  const o = Object.assign({}, PLATE, opts || {});
+  const n = Math.floor(o.seconds * sampleRate);
+  const chans = [new Float32Array(n), new Float32Array(n)];
+  chans.forEach((ch, c) => {
+    let s = (o.seed + c * 0x9E3779B1) >>> 0;
+    const rnd = () => {   // xorshift32 -> [-1, 1)
+      s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0;
+      return s / 2147483648 - 1;
+    };
+    let lp = 0;
+    for (let i = 0; i < n; i++) {
+      const t = i / sampleRate;
+      const env = (1 - Math.exp(-t / o.bloom)) * Math.exp(-t * 6.907755 / o.rt60);
+      // The low-pass cutoff glides from bright to dark over the decay (log-spaced)
+      const fc = o.brightHz * Math.pow(o.darkHz / o.brightHz, Math.min(1, t / o.rt60));
+      const a = 1 - Math.exp(-2 * Math.PI * fc / sampleRate);
+      lp += (rnd() - lp) * a;
+      ch[i] = lp * env;
+    }
+  });
+  // Normalize the energy gain (sum of squares, averaged over the two channels)
+  let e = 0;
+  for (const ch of chans) for (let i = 0; i < n; i++) e += ch[i] * ch[i];
+  e /= 2;
+  const g = Math.sqrt(o.energy / e);
+  for (const ch of chans) for (let i = 0; i < n; i++) ch[i] *= g;
+  return chans;
+}
+
+if (typeof module !== 'undefined') module.exports = { makePlateIR, PLATE };
+
+/* model.js */
+'use strict';
+/* Orbitakt's brain (port of RhythmModel.swift + SkyTracker.swift): keeps the catalog, reads the
+ * sky twice a second, puts every satellite in each family's cone on the radar at its real
+ * bearing, and drives the engine. No DOM in here; the page listens through `onChange`. */
+
+const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+const clamp01 = x => Math.min(1, Math.max(0, x));
+
+const SCALES = [
+  { name: 'Major pentatonic', steps: [0, 2, 4, 7, 9] },
+  { name: 'Minor pentatonic', steps: [0, 3, 5, 7, 10] },
+  { name: 'Major', steps: [0, 2, 4, 5, 7, 9, 11] },
+  { name: 'Natural minor', steps: [0, 2, 3, 5, 7, 8, 10] },
+  { name: 'Dorian', steps: [0, 2, 3, 5, 7, 9, 10] },
+  { name: 'Lydian', steps: [0, 2, 4, 6, 7, 9, 11] },
+  { name: 'Whole tone', steps: [0, 2, 4, 6, 8, 10] },
+  { name: 'Hirajoshi', steps: [0, 2, 3, 7, 8] },
+  { name: 'Suspended', steps: [0, 2, 5, 7, 10] },
+];
+const PITCH_NAMES = ['C', 'C♯', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B'];
+
+/** Four tracks: a family of satellites, a cone of sky around the zenith, and a drum.
+ *  Sparse on purpose: about four kicks, two rimshots, five hats and two gated hats a sweep. */
+const SPECS = [
+  { fam: FAM.NAV, sound: 'kick', color: '#ff8c40', target: 4 },
+  { fam: FAM.LEO, sound: 'rim', color: '#73d98c', target: 2 },
+  { fam: FAM.SWARM, sound: 'hat', color: '#73bfff', target: 5 },
+  { fam: FAM.BELT, sound: 'gate hat', color: '#d999ff', target: 2 },
+];
+const CREW_COLOR = '#ffd966';
+const FAM_COLOR = [SPECS[0].color, SPECS[1].color, SPECS[2].color, SPECS[3].color, CREW_COLOR, '#808080'];
+const MAX_EVENTS = 32, GRID_SLOTS = 16;
+
+const PLACES = [
+  { key: 'watertown', name: 'Watertown, MA', lat: 42.37, lon: -71.18 },
+  { key: 'nyc', name: 'New York', lat: 40.71, lon: -74.01 },
+  { key: 'london', name: 'London', lat: 51.51, lon: -0.13 },
+  { key: 'reykjavik', name: 'Reykjavík', lat: 64.15, lon: -21.94 },
+  { key: 'mumbai', name: 'Mumbai', lat: 19.08, lon: 72.88 },
+  { key: 'singapore', name: 'Singapore', lat: 1.35, lon: 103.82 },
+  { key: 'tokyo', name: 'Tokyo', lat: 35.68, lon: 139.69 },
+  { key: 'capetown', name: 'Cape Town', lat: -33.92, lon: 18.42 },
+  { key: 'saopaulo', name: 'São Paulo', lat: -23.55, lon: -46.63 },
+  { key: 'sydney', name: 'Sydney', lat: -33.87, lon: 151.21 },
+];
+
+class RhythmModel {
+  constructor(engine) {
+    this.engine = engine;
+    this.onChange = null;
+
+    // What the sky is doing
+    this.snapshot = { time: 0, blips: [], catalogSize: 0, counts: [0, 0, 0, 0, 0, 0] };
+    this.tracks = SPECS.map(() => ({ hits: [], cone: 30, inCone: 0, auto: true, muted: false }));
+    this.isPlaying = false;
+    this.status = 'Reading the sky…';
+    this.dataNote = '';
+    this.live = false;
+    this.crewNote = null;
+    this.orbitBPM = 84;
+    this.effectiveBPM = 84;
+    this.throwLevel = 0;
+    this.pings = [];          // recent zenith pings, for the dome
+
+    // Settings (persisted)
+    this.s = {
+      useLive: true, scaleIndex: 0, rootPC: 2, tempoSource: 'orbit', manualBPM: 84,
+      swing: 0.1, space: 0.6, dub: 0.55, dustOn: true, division: 2, quantize: 0.5,
+      pingRadius: 4, gongOn: true, place: 'watertown', keepAwake: true, askedLocation: false,
+      deviceLat: null, deviceLon: null,
+    };
+    this.runs = SPECS.map(() => ({ cone: -1, ids: new Set(), manualCone: null }));
+    this._load();
+
+    // Sky
+    this.observer = null;
+    this.sats = [];
+    this.fetching = false;
+    this.loadedLive = false;
+    this.lastSnapTime = 0;
+    this.pingIDs = new Set();
+    this.pingSlot = 0;
+    this.lastPing = 0;
+    this.crewIDs = new Set();
+    this.lastGongBar = -1;
+    this.scratch = { r: [0, 0, 0], lk: [0, 0] };
+    this._applyPlace();
+    this._pushAll();
+
+    this.tracker = setInterval(() => this._step(), 500);
+    this.ticker = setInterval(() => this._fastTick(), 250);
+    this.catalogTimer = setInterval(() => this._refreshCatalogIfDue(), 30 * 60 * 1000);
+    this._reloadCatalog();
+  }
+
+  get steps() { return SCALES[Math.max(0, Math.min(SCALES.length - 1, this.s.scaleIndex))].steps; }
+  get placeName() {
+    if (this.s.place === 'device') {
+      const la = this.s.deviceLat, lo = this.s.deviceLon;
+      return `Your location (${Math.abs(la).toFixed(2)}°${la >= 0 ? 'N' : 'S'} ${Math.abs(lo).toFixed(2)}°${lo >= 0 ? 'E' : 'W'})`;
+    }
+    return (PLACES.find(p => p.key === this.s.place) || PLACES[0]).name;
+  }
+  get lat() { return this.s.place === 'device' ? this.s.deviceLat : (PLACES.find(p => p.key === this.s.place) || PLACES[0]).lat; }
+  get lon() { return this.s.place === 'device' ? this.s.deviceLon : (PLACES.find(p => p.key === this.s.place) || PLACES[0]).lon; }
+
+  _emit() { if (this.onChange) this.onChange(); }
+
+  // ---------- Settings ----------
+
+  /** Change a setting and push whatever it affects to the engine. */
+  setSetting(k, v) {
+    this.s[k] = v;
+    switch (k) {
+      case 'swing': this.engine.set('swing', v); break;
+      case 'dub': this.engine.set('dub', v); break;
+      case 'division': this.engine.set('division', v); break;
+      case 'quantize': this.engine.set('quantize', v); break;
+      case 'space': this.engine.setSpace(v); break;
+      case 'useLive': this._reloadCatalog(); break;
+      case 'place': this._applyPlace(); break;
+    }
+    this._save();
+    this._emit();
+  }
+
+  _pushAll() {
+    const e = this.engine, s = this.s;
+    e.set('swing', s.swing); e.set('dub', s.dub); e.set('division', s.division); e.set('quantize', s.quantize);
+    e.setSpace(s.space);
+    this.tracks.forEach((t, i) => e.setMute(i, t.muted));
+  }
+
+  setMuted(m, t) {
+    this.tracks[t].muted = m;
+    this.engine.setMute(t, m);
+    this._save();
+    this._emit();
+  }
+
+  /** null = the cone adapts by itself; otherwise a fixed half-angle in degrees. */
+  setCone(deg, t) {
+    this.runs[t].manualCone = deg;
+    this.tracks[t].auto = deg == null;
+    if (deg != null) { this.runs[t].cone = deg; this.tracks[t].cone = deg; }
+    this._save();
+    if (this.snapshot.time > 0) this._build(t, this.snapshot, 0);
+    this._emit();
+  }
+
+  /** When a hit fires within the sweep, matching the engine: its bearing pulled toward the
+   *  nearest of 16 grid slots by Quantize, odd slots a little late with swing. */
+  firePhase(bearingPhase) {
+    const g = GRID_SLOTS;
+    const slot = Math.round(bearingPhase * g);
+    const grid = (slot + (slot % 2 === 1 ? Math.min(0.4, this.s.swing) : 0)) / g;
+    const f = bearingPhase + this.s.quantize * (grid - bearingPhase);
+    return f >= 1 ? f - 1 : f;
+  }
+
+  // ---------- Transport ----------
+
+  async togglePlay() {
+    if (this.isPlaying) {
+      this.engine.stop();
+      this.isPlaying = false;
+      this._emit();
+      return;
+    }
+    this.isPlaying = true;          // optimistic: the button answers the tap at once
+    this._emit();
+    try {
+      await this.engine.start();
+    } catch (err) {
+      this.isPlaying = false;
+      this.status = 'Audio failed to start: ' + (err && err.message ? err.message : err);
+      this._emit();
+    }
+  }
+
+  // ---------- Location ----------
+
+  /** Ask the browser for the player's position (rounded to 0.01 degrees, about a kilometre). */
+  useMyLocation() {
+    return new Promise(resolve => {
+      this.s.askedLocation = true;
+      this._save();
+      if (!navigator.geolocation) { resolve(false); return; }
+      navigator.geolocation.getCurrentPosition(pos => {
+        const la = Math.round(pos.coords.latitude * 100) / 100, lo = Math.round(pos.coords.longitude * 100) / 100;
+        this.s.deviceLat = la; this.s.deviceLon = lo;
+        this.setSetting('place', 'device');
+        resolve(true);
+      }, () => resolve(false), { enableHighAccuracy: false, timeout: 15000, maximumAge: 3600000 });
+    });
+  }
+
+  _applyPlace() {
+    if (this.s.place === 'device' && (this.s.deviceLat == null || this.s.deviceLon == null)) this.s.place = 'watertown';
+    this.observer = new Observer(this.lat, this.lon);
+    if (this.snapshot.time > 0) this._step();
+    this._updateStatus();
+  }
+
+  // ---------- Catalog ----------
+
+  async _reloadCatalog() {
+    this.live = false;
+    this.loadedLive = false;
+    const text = this.s.useLive ? CatalogStore.cached() : null;
+    if (text) {
+      const sats = await this._parseChunked(text);
+      this._adopt(sats, true);
+    } else {
+      this._adopt(simulatedCatalog(), false);
+    }
+    this._refreshCatalogIfDue();
+  }
+
+  /** Parse the big TLE text in slices, so the page stays responsive while it does. */
+  async _parseChunked(text) {
+    const lines = text.split(/\r?\n/);
+    const out = [];
+    const slice = 3 * 1500;
+    for (let i = 0; i < lines.length; i += slice) {
+      let end = Math.min(lines.length, i + slice + 3);
+      out.push(...parseTLE(lines.slice(i, end).join('\n')));
+      await new Promise(r => setTimeout(r, 0));
+    }
+    // Slices overlap by a few lines so no entry is cut; drop the duplicates that makes
+    const seen = new Set(), uniq = [];
+    for (const s of out) { const k = s.id + '|' + s.name; if (!seen.has(k)) { seen.add(k); uniq.push(s); } }
+    return uniq;
+  }
+
+  _adopt(sats, isLive) {
+    if (isLive && !this.s.useLive) return;
+    if (isLive && sats.length < 100) {
+      if (!this.live && this.snapshot.catalogSize === 0) this._setCatalog(simulatedCatalog());
+      return;
+    }
+    this._setCatalog(sats);
+    this.live = isLive;
+    this.loadedLive = isLive;
+    this.runs = this.runs.map(r => ({ cone: -1, ids: new Set(), manualCone: r.manualCone }));
+    this._updateStatus();
+  }
+
+  _setCatalog(sats) { this.sats = sats; this._step(); }
+
+  async _refreshCatalogIfDue() {
+    if (!this.s.useLive || this.fetching || !CatalogStore.shouldFetch()) return;
+    this.fetching = true;
+    this._updateStatus();
+    const text = await CatalogStore.download();
+    this.fetching = false;
+    if (text) this._adopt(await this._parseChunked(text), true);
+    else this._updateStatus();
+  }
+
+  _updateStatus() {
+    if (this.live) {
+      this.status = 'Live · ' + this.placeName;
+      const f = CatalogStore.fetchedAt();
+      if (f) {
+        const h = (Date.now() / 1000 - f) / 3600;
+        const age = h < 1 ? 'under an hour' : (h < 48 ? Math.floor(h) + ' h' : Math.floor(h / 24) + ' days');
+        this.dataNote = this.snapshot.catalogSize.toLocaleString('en-US') + ' satellites · elements ' + age + ' old (CelesTrak)';
+      }
+    } else if (this.s.useLive) {
+      this.status = (this.fetching ? 'Simulated sky · fetching orbits…' : 'Simulated sky (no orbital data yet)') + ' · ' + this.placeName;
+      this.dataNote = 'Stand-in constellations until CelesTrak’s catalog arrives';
+    } else {
+      this.status = 'Simulated sky · ' + this.placeName;
+      this.dataNote = 'Real shells and densities, invented positions';
+    }
+    this._emit();
+  }
+
+  // ---------- Sky: propagate the catalog (twice a second) ----------
+
+  _step() {
+    if (!this.observer || !this.sats.length) return;
+    const now = Date.now() / 1000;
+    const g = gmstFromUnix(now);
+    const blips = [];
+    const counts = [0, 0, 0, 0, 0, 0];
+    const { r, lk } = this.scratch;
+    const obs = this.observer;
+    for (const s of this.sats) {
+      if (!s.orbit.position(now, r)) continue;
+      obs.look(r, g, lk);
+      if (lk[1] <= 0) continue;
+      counts[s.fam]++;
+      blips.push({ id: s.id, fam: s.fam, az: lk[0], el: lk[1], zenith: 90 - lk[1], period: s.orbit.periodMinutes });
+    }
+    this._process({ time: now, blips, catalogSize: this.sats.length, counts });
+  }
+
+  /** Sky -> rhythm. */
+  _process(s) {
+    const dt = this.lastSnapTime > 0 ? Math.min(5, s.time - this.lastSnapTime) : 0;
+    this.lastSnapTime = s.time;
+    this.snapshot = s;
+    for (let t = 0; t < SPECS.length; t++) this._build(t, s, dt);
+    this._zenithPings(s);
+    this._crew(s);
+    this._tempo(s, dt);
+    if (this.live) this._updateStatus(); else this._emit();
+  }
+
+  _build(t, snap, dt) {
+    const spec = SPECS[t];
+    const fam = snap.blips.filter(b => b.fam === spec.fam);
+    const run = this.runs[t];
+
+    // The cone: it adapts slowly (ten minutes) to hold about `target` satellites on average, so
+    // the difference between, say, Starlink's hundreds and GPS's dozen is divided out, while a
+    // busy or empty spell still comes through as more or fewer hits.
+    if (run.manualCone != null) {
+      run.cone = run.manualCone;
+    } else {
+      const zs = fam.map(b => b.zenith).sort((a, b) => a - b);
+      const target = zs.length >= spec.target ? Math.min(90, zs[spec.target - 1] + 0.1) : 90;
+      if (run.cone < 0) run.cone = target;
+      else if (dt > 0) run.cone += (target - run.cone) * (1 - Math.exp(-dt / 600));
+    }
+    const cone = Math.max(1, run.cone);
+    let members = fam.filter(b => b.zenith <= cone);
+    const ids = new Set(members.map(b => b.id));
+    // A low-orbit satellite crossing into its cone throws the echo send open
+    if (t === 1 && dt > 0 && run.ids.size > 0) {
+      for (const id of ids) if (!run.ids.has(id)) { this._throwEcho(0.55 + 0.45 * Math.random()); break; }
+    }
+    run.ids = ids;
+
+    // Every satellite in the cone hits once a sweep, as the beam passes its bearing.
+    // (If a hand-set cone holds more than 32, the highest 32 play.)
+    if (members.length > MAX_EVENTS) members = members.sort((a, b) => b.el - a.el).slice(0, MAX_EVENTS);
+    members.sort((a, b) => a.az - b.az);
+    const root = this.s.rootPC, sc = this.steps;
+    const list = { count: members.length, phase: [], vel: [], pan: [], freq: [] };
+    const hits = [];
+    for (const b of members) {
+      const height = clamp01((b.el - (90 - cone)) / Math.max(1, cone));   // 0 at the cone's rim, 1 at the zenith
+      const v = t === 0 ? 0.55 + 0.35 * height : 0.35 + 0.65 * height;
+      const ph = b.az / 360;
+      list.phase.push(ph); list.vel.push(v);
+      list.pan.push(Math.max(-0.9, Math.min(0.9, Math.sin(b.az * Math.PI / 180) * Math.cos(b.el * Math.PI / 180) * 1.1)));
+      list.freq.push(this._pitch(t, b, root, sc));
+      hits.push({ id: b.id, phase: ph, vel: v });
+    }
+    this.engine.setList(t, list);
+    this.engine.setBright(t, t === 2 ? clamp01(fam.length / 450) : 0.5);   // hats brighten with a busier Starlink sky
+
+    const v = this.tracks[t];
+    v.hits = hits; v.cone = cone; v.inCone = members.length; v.auto = run.manualCone == null;
+  }
+
+  _semis(d, sc) {
+    const n = sc.length;
+    const q = Math.floor(d / n);
+    return sc[d - q * n] + 12 * q;
+  }
+
+  _pitch(t, b, root, sc) {
+    switch (t) {
+      case 0: return mtof(29 + (root + 7) % 12);                  // a deep kick on the root (F1..E2, 44-82 Hz)
+      case 1: return mtof(81 + root + this._semis(2, sc));        // rimshot tuned to a scale degree, up where it cuts through the echo
+      case 2: return 5400;                                        // hat partials sit in a fixed metallic band
+      case 3: {                                                   // the gated hat's metal, tuned by where the satellite sits along the belt:
+        const x = clamp01((1 - Math.sin(b.az * Math.PI / 180)) / 2);   // darker in the east (~3.8 kHz) to brighter in the west (~6.2 kHz)
+        return 3800 * Math.pow(2, 0.7 * x);
+      }
+      default: return 1000;
+    }
+  }
+
+  /** Throw the echo send open (a dub move); it falls back over a few seconds. */
+  _throwEcho(amount) {
+    this.throwLevel = Math.max(this.throwLevel, Math.min(1, amount));
+    this.engine.set('throwAmt', this.throwLevel);
+  }
+
+  // ---------- Events ----------
+
+  /** Anything passing within `pingRadius` of straight up rings a glass bar. */
+  _zenithPings(s) {
+    const now = performance.now() / 1000;
+    const close = s.blips.filter(b => b.fam !== FAM.OTHER && b.zenith <= this.s.pingRadius);
+    const ids = new Set(close.map(b => b.id));
+    const fresh = close.filter(b => !this.pingIDs.has(b.id));
+    this.pingIDs = ids;
+    this.pings = this.pings.filter(p => now - p.t <= 6);
+    if (!this.isPlaying || !fresh.length || now - this.lastPing <= 1.2) return;
+    const b = fresh.reduce((m, c) => (c.el > m.el ? c : m));
+    this.lastPing = now;
+    const sc = this.steps;
+    const d = (b.id >>> 0) % (2 * sc.length);
+    this.engine.ping(mtof(72 + this.s.rootPC + this._semis(d, sc)), 0.55 + Math.random() * 0.35, Math.sin(b.az * Math.PI / 180) * 0.6);
+    this._throwEcho(0.85);
+    this.pings.push({ az: b.az, el: b.el, t: now });
+  }
+
+  /** While a crewed station is up, a gong every four bars; and one as it rises. */
+  _crew(s) {
+    const up = s.blips.filter(b => b.fam === FAM.CREW && b.el > 5);
+    const ids = new Set(up.map(b => b.id));
+    let rising = false;
+    for (const id of ids) if (!this.crewIDs.has(id)) rising = true;
+    this.crewIDs = ids;
+    const crewUp = up.length > 0;
+    let crewEl = 0;
+    if (crewUp) {
+      const top = up.reduce((m, c) => (c.el > m.el ? c : m));
+      crewEl = top.el;
+      const name = top.id === 25544 ? 'ISS' : (top.id === 48274 ? 'Tiangong' : 'A crewed station');
+      this.crewNote = name + ' overhead · ' + Math.round(crewEl) + '° up';
+    } else {
+      this.crewNote = null;
+    }
+    if (!this.isPlaying || !this.s.gongOn || !crewUp) return;
+    const bar = Math.floor(this.engine.beam().beats / 16);
+    if (rising || bar !== this.lastGongBar) {
+      this.lastGongBar = bar;
+      this.engine.gong(mtof(36 + this.s.rootPC), 0.35 + 0.65 * Math.sin(crewEl * Math.PI / 180), 0);
+    }
+  }
+
+  // ---------- Tempo ----------
+
+  /** The overhead orbits' own period, thirteen octaves up: a 95-minute Starlink orbit is
+   *  1/5736 Hz; x 2^13 that's 85.7 BPM. Higher shells are slower, the ISS a touch faster. */
+  _tempo(s, dt) {
+    const low = s.blips.filter(b => (b.fam === FAM.SWARM || b.fam === FAM.LEO) && b.el > 30)
+      .map(b => b.period).sort((a, b) => a - b);
+    if (low.length) {
+      const target = 8192 / low[Math.floor(low.length / 2)];
+      this.orbitBPM = dt > 0 ? this.orbitBPM + (target - this.orbitBPM) * (1 - Math.exp(-dt / 20)) : target;
+    }
+    this.effectiveBPM = this.s.tempoSource === 'orbit' ? this.orbitBPM : this.s.manualBPM;
+    this.engine.set('bpm', this.effectiveBPM);
+    // Dust: a breath of hiss and crackle that thickens with the crowd overhead
+    this.engine.set('dust', this.s.dustOn ? 0.25 + 0.75 * clamp01(s.blips.length / 1500) : 0);
+  }
+
+  _fastTick() {
+    if (this.throwLevel > 0.001) {
+      this.throwLevel *= Math.exp(-0.25 / 2.5);
+      if (this.throwLevel < 0.01) this.throwLevel = 0;
+      this.engine.set('throwAmt', this.throwLevel);
+    }
+  }
+
+  // ---------- Persistence ----------
+
+  _save() {
+    try {
+      localStorage.setItem('orbitakt.settings', JSON.stringify({
+        s: this.s, mutes: this.tracks.map(t => t.muted), cones: this.runs.map(r => r.manualCone),
+      }));
+    } catch (e) {}
+  }
+
+  _load() {
+    try {
+      const raw = localStorage.getItem('orbitakt.settings');
+      if (!raw) return;
+      const d = JSON.parse(raw);
+      for (const k of Object.keys(this.s)) if (d.s && k in d.s && typeof d.s[k] === typeof this.s[k]) this.s[k] = d.s[k];
+      if (d.s) { if (d.s.deviceLat != null) this.s.deviceLat = d.s.deviceLat; if (d.s.deviceLon != null) this.s.deviceLon = d.s.deviceLon; }
+      this.s.division = this.s.division === 4 ? 4 : 2;
+      this.s.dub = Math.min(0.85, Math.max(0, this.s.dub));
+      this.s.quantize = clamp01(this.s.quantize);
+      this.s.scaleIndex = Math.max(0, Math.min(SCALES.length - 1, Math.floor(this.s.scaleIndex)));
+      this.s.rootPC = Math.max(0, Math.min(11, Math.floor(this.s.rootPC)));
+      if (Array.isArray(d.mutes) && d.mutes.length === this.tracks.length) d.mutes.forEach((m, i) => { this.tracks[i].muted = !!m; });
+      if (Array.isArray(d.cones) && d.cones.length === this.runs.length) {
+        d.cones.forEach((c, i) => { if (typeof c === 'number' && c > 0) { this.runs[i].manualCone = c; this.runs[i].cone = c; this.tracks[i].auto = false; this.tracks[i].cone = c; } });
+      }
+    } catch (e) {}
+  }
+}
+
+if (typeof module !== 'undefined') module.exports = { RhythmModel, SPECS, SCALES, PITCH_NAMES, PLACES, FAM_COLOR, CREW_COLOR, mtof, clamp01 };
+
+/* engine.js */
+'use strict';
+/* The page's audio engine: one AudioContext, one AudioWorkletNode running OrbitDSP, and the
+ * plate reverb, limiter and master chain around it.
+ *
+ *   OrbitDSP dry  (drums + dub echoes) --------------------------------- master -- limiter -- out
+ *   OrbitDSP send -- plate (convolver) -- high-pass 320 -- low-pass 6k -- level --'
+ *
+ * Settings made before the context exists (it can only be created on a tap) are remembered
+ * and replayed when it starts. */
+
+class OrbitEngine {
+  /** @param {string} workletSource  the text of dsp.js + worklet.js, loaded as a module */
+  constructor(workletSource) {
+    this.src = workletSource;
+    this.ctx = null;
+    this.node = null;
+    this.ready = null;                  // promise for the one-time setup
+    this.wantsRunning = false;
+    this.stopToken = 0;
+    // Remembered state, replayed into a new worklet
+    this.params = { master: 0, run: 0, bpm: 84, swing: 0.1, division: 2, quantize: 0.5, dub: 0.55,
+                    throwAmt: 0, reverbSend: 0.6, dust: 0 };
+    this.lists = [null, null, null, null];
+    this.mutes = [0, 0, 0, 0];
+    this.brights = [0.5, 0.5, 0.5, 0.5];
+    this.plateGainValue = 0.92;
+    // Beam estimate (the worklet reports every ~20 ms; we interpolate between reports)
+    this.last = { s: 0, b: 0, r: false, perf: 0 };
+    this.keepAlive = null;
+  }
+
+  // ---------- Control (safe before start) ----------
+
+  post(m) { if (this.node) this.node.port.postMessage(m); }
+
+  set(k, v) { this.params[k] = v; this.post({ type: 'set', k, v }); }
+
+  setList(t, list) { this.lists[t] = list; this.post(Object.assign({ type: 'list', t }, list)); }
+
+  setMute(t, muted) { this.mutes[t] = muted ? 1 : 0; this.post({ type: 'mute', t, v: muted ? 1 : 0 }); }
+
+  setBright(t, v) { this.brights[t] = v; this.post({ type: 'bright', t, v }); }
+
+  ping(f, v, p) { this.post({ type: 'ping', f, v, p }); }
+
+  gong(f, v, p) { this.post({ type: 'gong', f, v, p }); }
+
+  /** 0..1: how much plate (the send amount, and the return level, as in the iPhone app). */
+  setSpace(x) {
+    this.set('reverbSend', 0.2 + 0.8 * x);
+    this.plateGainValue = Math.max(0.05, 0.5 + 0.7 * x);
+    if (this.plateGain) this.plateGain.gain.setTargetAtTime(this.plateGainValue, this.ctx.currentTime, 0.05);
+  }
+
+  get isRunning() { return this.wantsRunning; }
+
+  // ---------- Life cycle ----------
+
+  /** Create the context and graph (once) and make sure it's running. Must follow a tap. */
+  async start() {
+    this.stopToken++;
+    this.wantsRunning = true;
+    this._unlockiOS();
+    if (!this.ready) this.ready = this._build();
+    await this.ready;
+    if (this.ctx.state !== 'running') await this.ctx.resume();
+    this.set('master', 0.85);
+    this.set('run', 1);
+  }
+
+  /** Fade out, let the echoes and plate ring, then suspend the context to save power. */
+  stop() {
+    this.wantsRunning = false;
+    this.set('run', 0);
+    this.set('master', 0);
+    const token = ++this.stopToken;
+    setTimeout(() => {
+      if (token === this.stopToken && !this.wantsRunning && this.ctx && this.ctx.state === 'running') {
+        this.ctx.suspend().catch(() => {});
+        this._releaseiOS();
+      }
+    }, 6000);
+  }
+
+  /** Where the beam is, 0..1 from north, and the beats since play. */
+  beam(now = performance.now()) {
+    const l = this.last;
+    if (!l.r) return { sweep: l.s, beats: l.b, running: false };
+    const sweepBeats = this.params.division > 3 ? 4 : 8;
+    const rate = Math.max(30, this.params.bpm) / 60 / sweepBeats;   // sweeps per second
+    // What's coming out of the speakers lags what the worklet just rendered by the output latency
+    const lat = this.ctx ? (this.ctx.baseLatency || 0) + (this.ctx.outputLatency || 0) : 0;
+    const dt = Math.max(0, Math.min(0.25, (now - l.perf) / 1000));
+    let s = l.s + (dt - lat) * rate;
+    s -= Math.floor(s);
+    return { sweep: s, beats: l.b + dt * rate * sweepBeats, running: true };
+  }
+
+  async _build() {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ctx = this.ctx = new AC({ latencyHint: 'playback' });
+    const url = URL.createObjectURL(new Blob([this.src], { type: 'text/javascript' }));
+    try { await ctx.audioWorklet.addModule(url); }
+    catch (e) {   // a page opened from file:// has an opaque origin and can't load blob modules; a data: URL can
+      await ctx.audioWorklet.addModule('data:text/javascript;base64,' + btoa(unescape(encodeURIComponent(this.src))));
+    } finally { URL.revokeObjectURL(url); }
+    const node = this.node = new AudioWorkletNode(ctx, 'orbitakt', {
+      numberOfInputs: 0, numberOfOutputs: 2, outputChannelCount: [2, 2],
+    });
+    node.port.onmessage = (e) => {
+      const m = e.data;
+      this.last = { s: m.s, b: m.b, r: m.r, perf: performance.now() };
+    };
+
+    // Master and a safety limiter (the iPhone app has one too): a fast compressor set as a limiter
+    const limiter = ctx.createDynamicsCompressor();
+    limiter.threshold.value = -2; limiter.knee.value = 0; limiter.ratio.value = 20;
+    limiter.attack.value = 0.003; limiter.release.value = 0.15;
+    limiter.connect(ctx.destination);
+    node.connect(limiter, 0);
+
+    // The plate
+    const plate = ctx.createConvolver();
+    plate.normalize = false;
+    const ir = makePlateIR(ctx.sampleRate);
+    const buf = ctx.createBuffer(2, ir[0].length, ctx.sampleRate);
+    buf.copyToChannel(ir[0], 0); buf.copyToChannel(ir[1], 1);
+    plate.buffer = buf;
+    const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 320; hp.Q.value = 0.707;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 6000; lp.Q.value = 0.707;
+    const gain = this.plateGain = ctx.createGain();
+    gain.gain.value = this.plateGainValue;
+    node.connect(plate, 1);
+    plate.connect(hp); hp.connect(lp); lp.connect(gain); gain.connect(limiter);
+
+    // Replay what was set before we existed
+    for (const [k, v] of Object.entries(this.params)) this.post({ type: 'set', k, v });
+    this.lists.forEach((l, t) => { if (l) this.post(Object.assign({ type: 'list', t }, l)); });
+    this.mutes.forEach((v, t) => this.post({ type: 'mute', t, v }));
+    this.brights.forEach((v, t) => this.post({ type: 'bright', t, v }));
+
+    // If the system interrupts us (a call, the phone locking), come back when asked
+    ctx.onstatechange = () => { this.onstate && this.onstate(ctx.state); };
+  }
+
+  /** On iPhone the ringer switch silences Web Audio unless the page is "playing media". A silent
+   *  looping <audio> element, and the audio session type where the browser supports it, fix that. */
+  _unlockiOS() {
+    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+    if (this.keepAlive) { this.keepAlive.play().catch(() => {}); return; }
+    try {
+      const sr = 8000, n = 800, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+      const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+      w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVEfmt '); v.setUint32(16, 16, true);
+      v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true);
+      v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true);
+      const a = new Audio(URL.createObjectURL(new Blob([buf], { type: 'audio/wav' })));
+      a.loop = true; a.volume = 0.01;
+      a.setAttribute('playsinline', '');
+      this.keepAlive = a;
+      a.play().catch(() => {});
+    } catch (e) {}
+  }
+
+  _releaseiOS() { try { this.keepAlive && this.keepAlive.pause(); } catch (e) {} }
+}
+
+if (typeof module !== 'undefined') module.exports = { OrbitEngine };
+
+/* ui.js */
+'use strict';
+/* The page: dome, track rows, readings, settings. Everything here is presentation; the
+ * model decides, the engine sounds. */
+
+(function () {
+  const $ = (sel, root) => (root || document).querySelector(sel);
+  const el = (tag, props, ...kids) => {
+    const n = document.createElement(tag);
+    if (props) for (const k of Object.keys(props)) {
+      if (k === 'class') n.className = props[k];
+      else if (k === 'text') n.textContent = props[k];
+      else if (k.startsWith('on')) n.addEventListener(k.slice(2), props[k]);
+      else n.setAttribute(k, props[k]);
+    }
+    for (const c of kids) if (c != null) n.append(c);
+    return n;
+  };
+
+  const engine = new OrbitEngine(document.getElementById('worklet-src').textContent);
+  const model = new RhythmModel(engine);
+  window.orbitakt = { model, engine };
+
+  // ---------- Static structure ----------
+  const app = $('#app');
+  const domeCanvas = el('canvas', { id: 'dome', 'aria-label': 'Sky dome: satellites overhead, with the sweeping beam' });
+  const playBtn = el('button', { id: 'play', class: 'play', type: 'button' });
+  const statusEl = el('div', { class: 'status', role: 'status' });
+  const crewEl = el('div', { class: 'crew' });
+  const rowsEl = el('div', { class: 'rows' });
+  const readEl = el('div', { class: 'readings' });
+  const settingsEl = el('div', { class: 'settings' });
+  const noteEl = el('div', { class: 'note' });
+
+  app.append(
+    el('header', null,
+      el('h1', { text: 'Orbitakt' }),
+      el('p', { class: 'tag', text: 'A drum machine played by the satellites above you.' })),
+    statusEl,
+    el('div', { class: 'domewrap' }, domeCanvas),
+    el('div', { class: 'controls' }, playBtn, crewEl),
+    rowsEl, readEl, settingsEl, noteEl);
+
+  // Track rows
+  const rowRefs = SPECS.map((spec, t) => {
+    const canvas = el('canvas', { class: 'rowcanvas', 'aria-hidden': 'true' });
+    const label = el('span', { class: 'rl', style: 'color:' + spec.color, text: ['NAV · kick', 'LEO · rim', 'SWARM · hat', 'BELT · gate hat'][t] });
+    const info = el('span', { class: 'ri' });
+    const mute = el('button', { type: 'button', class: 'mute', 'aria-label': 'Mute ' + spec.sound, onclick: () => model.setMuted(!model.tracks[t].muted, t), text: 'M' });
+    rowsEl.append(el('div', { class: 'row' }, el('div', { class: 'rh' }, label, info, mute), canvas));
+    return { canvas, info, mute };
+  });
+
+  // Settings
+  const sect = (title, ...kids) => el('details', null, el('summary', { text: title }), el('div', { class: 'sec' }, ...kids));
+  const slider = (label, key, min, max, step, fmt) => {
+    const out = el('output');
+    const inp = el('input', { type: 'range', min, max, step, 'aria-label': label });
+    inp.addEventListener('input', () => { model.setSetting(key, parseFloat(inp.value)); out.textContent = fmt(model.s[key]); });
+    const refresh = () => { inp.value = model.s[key]; out.textContent = fmt(model.s[key]); };
+    refresh();
+    return { node: el('label', { class: 'ctl' }, el('span', { text: label }), inp, out), refresh };
+  };
+  const select = (label, key, options, conv) => {
+    const sel = el('select', { 'aria-label': label });
+    options.forEach(([v, txt]) => sel.append(el('option', { value: v, text: txt })));
+    sel.addEventListener('change', () => model.setSetting(key, conv ? conv(sel.value) : sel.value));
+    const refresh = () => { sel.value = String(model.s[key]); };
+    refresh();
+    return { node: el('label', { class: 'ctl' }, el('span', { text: label }), sel), refresh };
+  };
+  const toggle = (label, key) => {
+    const cb = el('input', { type: 'checkbox', 'aria-label': label });
+    cb.addEventListener('change', () => model.setSetting(key, cb.checked));
+    const refresh = () => { cb.checked = !!model.s[key]; };
+    refresh();
+    return { node: el('label', { class: 'ctl check' }, cb, el('span', { text: label })), refresh };
+  };
+
+  const pct = v => Math.round(v * 100) + '%';
+  const placeOpts = PLACES.map(p => [p.key, p.name]);
+  const placeSel = select('Place', 'place', placeOpts);
+  const locBtn = el('button', { type: 'button', class: 'btn', text: 'Use my location', onclick: async () => {
+    locBtn.disabled = true; locBtn.textContent = 'Locating…';
+    const ok = await model.useMyLocation();
+    locBtn.disabled = false; locBtn.textContent = ok ? 'Using your location' : 'Location unavailable';
+    refreshAll();
+  } });
+  const live = toggle('Real satellites (CelesTrak)', 'useLive');
+  const root = select('Key', 'rootPC', PITCH_NAMES.map((n, i) => [i, n]), Number);
+  const scale = select('Scale', 'scaleIndex', SCALES.map((s, i) => [i, s.name]), Number);
+  const tempoSrc = select('Tempo from', 'tempoSource', [['orbit', 'The orbits'], ['manual', 'Manual']]);
+  const bpm = slider('Manual tempo', 'manualBPM', 60, 132, 1, v => Math.round(v) + ' BPM');
+  const sweepLen = select('Sweep', 'division', [[2, 'Long (8 beats)'], [4, 'Short (4 beats)']], Number);
+  const swing = slider('Swing', 'swing', 0, 0.4, 0.01, pct);
+  const quant = slider('Quantize', 'quantize', 0, 1, 0.01, pct);
+  const dub = slider('Dub echo', 'dub', 0, 0.85, 0.01, pct);
+  const space = slider('Space (plate)', 'space', 0, 1, 0.01, pct);
+  const dust = toggle('Dust (hiss and crackle)', 'dustOn');
+  const ping = slider('Zenith ping radius', 'pingRadius', 1, 10, 0.5, v => v.toFixed(1) + '°');
+  const gong = toggle('Gong for a crewed station', 'gongOn');
+  const awake = toggle('Keep the screen awake while playing', 'keepAwake');
+
+  const coneCtl = SPECS.map((spec, t) => {
+    const out = el('output');
+    const inp = el('input', { type: 'range', min: 2, max: 90, step: 1, 'aria-label': spec.sound + ' cone' });
+    const auto = el('input', { type: 'checkbox', 'aria-label': spec.sound + ' cone auto' });
+    const sync = () => { const tr = model.tracks[t]; auto.checked = tr.auto; inp.disabled = tr.auto; out.textContent = (tr.auto ? 'auto ' : '') + Math.round(tr.cone) + '°'; };
+    auto.addEventListener('change', () => { model.setCone(auto.checked ? null : Math.max(2, Math.round(model.tracks[t].cone)), t); inp.value = model.tracks[t].cone; sync(); });
+    inp.addEventListener('input', () => { model.setCone(parseFloat(inp.value), t); sync(); });
+    return { node: el('label', { class: 'ctl' }, el('span', { style: 'color:' + spec.color, text: spec.sound + ' cone' }), auto, inp, out), sync, inp };
+  });
+
+  settingsEl.append(
+    sect('Place and data', placeSel.node, locBtn, live.node),
+    sect('Key and tempo', root.node, scale.node, tempoSrc.node, bpm.node, sweepLen.node),
+    sect('Feel', swing.node, quant.node, dub.node, space.node, dust.node),
+    sect('Events', ping.node, gong.node),
+    sect('Cones (how much sky each drum listens to)', ...coneCtl.map(c => c.node)),
+    sect('Screen', awake.node));
+  const refreshAll = () => {
+    [placeSel, live, root, scale, tempoSrc, bpm, sweepLen, swing, quant, dub, space, dust, ping, gong, awake].forEach(c => c.refresh());
+  };
+
+  noteEl.append(
+    el('h2', { text: 'What is this?' }),
+    el('p', { text: 'Orbitakt reads where thousands of real satellites are right now, computed in your browser from their published orbits (SGP4, CelesTrak data), and turns the ones overhead into a rhythm.' }),
+    el('p', { text: 'A beam sweeps around the sky like a radar. Each drum listens to one family of satellites inside a cone around straight-up: navigation satellites play the kick, low-orbit ones the rimshot, the Starlink swarm the hats, and the geostationary belt a gated hat. A satellite sounds when the beam crosses its bearing; the higher it is, the louder. Anything passing nearly straight overhead rings a glass bar; a crewed station adds a gong.' }),
+    el('p', { text: 'The tempo is the overhead orbits’ own period raised thirteen octaves, so the music slowly drifts with the sky. Without orbital data the page falls back to a simulated sky of the same real shells. Your location, if you share it, is rounded to about a kilometre, stays on your device, and is used only for the sky maths.' }),
+    el('p', { class: 'small', text: 'Sound by OrbitDSP, a small synthesizer written for this page. Orbital data: CelesTrak.' }));
+
+  // ---------- Buttons and state ----------
+  let wake = null;
+  async function wantWake() {
+    try {
+      if (model.isPlaying && model.s.keepAwake && 'wakeLock' in navigator && !wake) {
+        wake = await navigator.wakeLock.request('screen');
+        wake.addEventListener('release', () => { wake = null; });
+      } else if ((!model.isPlaying || !model.s.keepAwake) && wake) { await wake.release(); wake = null; }
+    } catch (e) { wake = null; }
+  }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) wantWake(); });
+
+  playBtn.addEventListener('click', () => {
+    const starting = !model.isPlaying;
+    model.togglePlay();                                   // first: audio must start inside the tap
+    if (starting && !model.s.askedLocation && model.s.place !== 'device') model.useMyLocation().then(refreshAll);
+  });
+  engine.onstate = st => { if (st === 'interrupted' || st === 'suspended') { if (engine.wantsRunning && !document.hidden) engine.ctx.resume().catch(() => {}); } };
+
+  function renderText() {
+    playBtn.textContent = model.isPlaying ? 'Stop' : 'Play';
+    playBtn.setAttribute('aria-pressed', model.isPlaying ? 'true' : 'false');
+    statusEl.textContent = model.status;
+    crewEl.textContent = model.crewNote || '';
+    crewEl.style.display = model.crewNote ? '' : 'none';
+    const sn = model.snapshot;
+    readEl.replaceChildren(
+      reading(Math.round(model.effectiveBPM), 'BPM'),
+      reading(sn.blips.length.toLocaleString('en-US'), 'above the horizon'),
+      reading(sn.catalogSize.toLocaleString('en-US'), model.live ? 'tracked' : 'simulated'),
+      el('div', { class: 'datanote', text: model.dataNote }));
+    model.tracks.forEach((tr, t) => {
+      rowRefs[t].info.textContent = tr.inCone + ' in ' + Math.round(tr.cone) + '°' + (tr.auto ? '' : ' (set)');
+      rowRefs[t].mute.classList.toggle('on', tr.muted);
+      rowRefs[t].mute.setAttribute('aria-pressed', tr.muted ? 'true' : 'false');
+    });
+    coneCtl.forEach((c, t) => { if (document.activeElement !== c.inp) c.inp.value = model.tracks[t].cone; c.sync(); });
+    wantWake();
+  }
+  const reading = (v, l) => el('div', { class: 'reading' }, el('b', { text: String(v) }), el('span', { text: l }));
+  let textDirty = true;
+  model.onChange = () => { textDirty = true; };
+
+  // ---------- Drawing ----------
+  const reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function fit(c, h) {
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const w = Math.max(1, c.clientWidth), hh = h || Math.max(1, c.clientHeight);
+    if (c.width !== Math.round(w * dpr) || c.height !== Math.round(hh * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(hh * dpr); }
+    const g = c.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { g, w, h: hh };
+  }
+  const css = getComputedStyle(document.documentElement);
+  const INK = css.getPropertyValue('--ink').trim() || '#cfd6e6';
+
+  function drawDome() {
+    const { g, w, h } = fit(domeCanvas);
+    const R = Math.min(w, h) / 2 - 22, cx = w / 2, cy = h / 2;
+    g.clearRect(0, 0, w, h);
+    const sn = model.snapshot;
+    const bm = engine.beam();
+    const sweep = bm.sweep;
+    const pt = (az, zen) => [cx + R * (zen / 90) * Math.sin(az * Math.PI / 180), cy - R * (zen / 90) * Math.cos(az * Math.PI / 180)];
+
+    // Sky disc and rings
+    const grad = g.createRadialGradient(cx, cy, 0, cx, cy, R);
+    grad.addColorStop(0, 'rgba(40,60,110,.35)'); grad.addColorStop(1, 'rgba(10,14,26,.15)');
+    g.fillStyle = grad; g.beginPath(); g.arc(cx, cy, R, 0, 7); g.fill();
+    g.strokeStyle = 'rgba(160,180,220,.22)'; g.lineWidth = 1;
+    for (const e of [0, 30, 60]) { g.beginPath(); g.arc(cx, cy, R * (1 - e / 90), 0, 7); g.stroke(); }
+    g.beginPath(); g.moveTo(cx - R, cy); g.lineTo(cx + R, cy); g.moveTo(cx, cy - R); g.lineTo(cx, cy + R); g.stroke();
+    g.fillStyle = 'rgba(190,205,235,.7)'; g.font = '600 12px system-ui, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText('N', cx, cy - R - 11); g.fillText('S', cx, cy + R + 11); g.fillText('E', cx + R + 11, cy); g.fillText('W', cx - R - 11, cy);
+
+    // Cones
+    g.setLineDash([3, 4]);
+    SPECS.forEach((spec, t) => {
+      g.strokeStyle = spec.color + '88';
+      g.beginPath(); g.arc(cx, cy, R * (model.tracks[t].cone / 90), 0, 7); g.stroke();
+    });
+    g.setLineDash([]);
+
+    // The beam: a faint wedge trailing behind the line
+    const a = sweep * 2 * Math.PI - Math.PI / 2;
+    const wedge = g.createConicGradient ? g.createConicGradient(a - 0.9, cx, cy) : null;
+    if (wedge) {
+      wedge.addColorStop(0, 'rgba(160,200,255,0)'); wedge.addColorStop(0.14, 'rgba(160,200,255,.18)'); wedge.addColorStop(0.1432, 'rgba(160,200,255,0)'); wedge.addColorStop(1, 'rgba(160,200,255,0)');
+      g.fillStyle = wedge; g.beginPath(); g.arc(cx, cy, R, 0, 7); g.fill();
+    }
+    g.strokeStyle = 'rgba(190,220,255,.85)'; g.lineWidth = 1.5;
+    g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx + R * Math.cos(a), cy + R * Math.sin(a)); g.stroke();
+
+    // Every satellite above the horizon, small and dim
+    const inCone = new Map();
+    model.tracks.forEach((tr, t) => tr.hits.forEach(h => inCone.set(h.id, t)));
+    for (const b of sn.blips) {
+      if (inCone.has(b.id) && b.fam === SPECS[inCone.get(b.id)].fam) continue;
+      const [x, y] = pt(b.az, b.zenith);
+      g.fillStyle = FAM_COLOR[b.fam] + '55';
+      g.fillRect(x - 1, y - 1, 2, 2);
+    }
+    // The ones playing, bright, flaring as the beam passes
+    for (const b of sn.blips) {
+      const t = inCone.get(b.id);
+      if (t == null || b.fam !== SPECS[t].fam) continue;
+      const [x, y] = pt(b.az, b.zenith);
+      let d = sweep - b.az / 360; d -= Math.floor(d);                   // how far past the satellite the beam is
+      const flare = model.isPlaying ? Math.exp(-d * 14) : 0;
+      const col = SPECS[t].color;
+      if (flare > 0.02) { g.fillStyle = col + Math.round(flare * 90).toString(16).padStart(2, '0'); g.beginPath(); g.arc(x, y, 4 + 12 * flare, 0, 7); g.fill(); }
+      g.fillStyle = col; g.beginPath(); g.arc(x, y, 2.4 + 1.6 * flare, 0, 7); g.fill();
+    }
+    // Crewed station
+    for (const b of sn.blips) if (b.fam === FAM.CREW && b.el > 0) {
+      const [x, y] = pt(b.az, b.zenith);
+      g.strokeStyle = CREW_COLOR; g.lineWidth = 1.5; g.beginPath(); g.arc(x, y, 5, 0, 7); g.stroke();
+    }
+    // Zenith pings
+    const now = performance.now() / 1000;
+    for (const p of model.pings) {
+      const age = now - p.t; if (age > 2.5) continue;
+      const [x, y] = pt(p.az, 90 - p.el);
+      g.strokeStyle = 'rgba(255,255,255,' + (0.8 * (1 - age / 2.5)).toFixed(2) + ')'; g.lineWidth = 1.5;
+      g.beginPath(); g.arc(x, y, 4 + age * 14, 0, 7); g.stroke();
+    }
+    // Zenith mark
+    g.fillStyle = 'rgba(255,255,255,.5)'; g.fillRect(cx - 1, cy - 1, 2, 2);
+  }
+
+  function drawRows() {
+    const sweep = engine.beam().sweep;
+    SPECS.forEach((spec, t) => {
+      const { g, w, h } = fit(rowRefs[t].canvas, 30);
+      g.clearRect(0, 0, w, h);
+      g.fillStyle = 'rgba(160,180,220,.07)'; g.fillRect(0, 0, w, h);
+      g.fillStyle = 'rgba(160,180,220,.18)';
+      for (let i = 0; i < 16; i++) g.fillRect(Math.round(i * w / 16), i % 4 === 0 ? 0 : h - 5, 1, i % 4 === 0 ? h : 5);
+      const muted = model.tracks[t].muted;
+      for (const hit of model.tracks[t].hits) {
+        const ph = model.firePhase(hit.phase);
+        let d = sweep - ph; d -= Math.floor(d);
+        const flare = model.isPlaying && !muted ? Math.exp(-d * 10) : 0;
+        const x = ph * w, bh = 5 + hit.vel * (h - 10);
+        g.fillStyle = spec.color + (muted ? '33' : (flare > 0.05 ? 'ff' : '99'));
+        g.fillRect(x - 1.5, h - bh - 1, 3, bh);
+        if (flare > 0.05) { g.fillStyle = spec.color + Math.round(flare * 70).toString(16).padStart(2, '0'); g.fillRect(x - 6, 0, 12, h); }
+      }
+      g.fillStyle = 'rgba(200,225,255,.9)'; g.fillRect(sweep * w - 1, 0, 2, h);
+    });
+  }
+
+  let lastText = 0;
+  function frame(ts) {
+    if (!document.hidden) {
+      if (textDirty && ts - lastText > 200) { lastText = ts; textDirty = false; renderText(); }
+      drawDome(); drawRows();
+    }
+    requestAnimationFrame(frame);
+  }
+  refreshAll();
+  renderText();
+  requestAnimationFrame(frame);
+})();
+
+</script>
+</body>
+</html>
