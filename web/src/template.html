@@ -92,6 +92,15 @@ h1 { margin: 0; font: 300 22px/1.15 var(--mono); letter-spacing: .3em; color: #f
 .rlabel[aria-pressed="true"] span { opacity: .45; }
 .rowcanvas { flex: 1; min-width: 0; height: 26px; display: block; }
 
+.tempo { display: grid; grid-template-columns: 1fr auto auto; grid-template-areas: "l v p" "s s s"; align-items: center; gap: 4px 12px; padding: 12px 14px 6px; }
+.tempo .tl { grid-area: l; } .tempo output { grid-area: v; } .tempo .pill { grid-area: p; } .tempo .range { grid-area: s; height: 34px; }
+.tempo .tl { font: 500 11px/1.2 var(--mono); letter-spacing: .06em; color: var(--dim); white-space: nowrap; }
+.tempo output { font: 400 17px/1 var(--mono); font-variant-numeric: tabular-nums; color: #fff; min-width: 44px; text-align: right; white-space: nowrap; }
+.tempo output small { font-size: 10px; letter-spacing: .08em; color: var(--dim); margin-left: 4px; }
+.tempo.orbit .range { --accent: rgba(91,140,255,.45); }
+.pill { border: 1px solid var(--hair); background: rgba(255,255,255,.04); border-radius: 999px; padding: 6px 11px; cursor: pointer;
+  font: 500 10px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--dim); transition: all .2s; }
+.pill[aria-pressed="true"] { color: #dfe8ff; border-color: rgba(122,164,255,.6); background: rgba(91,140,255,.22); box-shadow: 0 0 14px rgba(91,140,255,.35); }
 .play {
   display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; height: 54px;
   border-radius: 14px; border: 1px solid rgba(160,190,255,.45); cursor: pointer;

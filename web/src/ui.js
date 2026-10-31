@@ -44,6 +44,28 @@
   const readEl = el('div', { class: 'readings' });
   const dataNoteEl = el('div', { class: 'datanote' });
 
+  // Scan rate (the tempo), right on the front: drag to take over, tap Orbit to give it back to the sky
+  const tempoOut = el('output');
+  const tempoRange = el('input', { type: 'range', class: 'range', min: 60, max: 132, step: 1, 'aria-label': 'Scan rate in bpm' });
+  const orbitBtn = el('button', { type: 'button', class: 'pill', text: 'Orbit', title: 'Follow the orbits overhead' });
+  const tempoEl = el('div', { class: 'panel tempo' }, el('span', { class: 'tl', text: 'Scan Rate (bpm)' }), tempoRange, tempoOut, orbitBtn);
+  function showTempo() {
+    const orbit = model.s.tempoSource === 'orbit';
+    const bpmNow = orbit ? model.orbitBPM : model.s.manualBPM;
+    tempoEl.classList.toggle('orbit', orbit);
+    orbitBtn.setAttribute('aria-pressed', orbit ? 'true' : 'false');
+    orbitBtn.setAttribute('aria-label', orbit ? 'Following the orbits' : 'Follow the orbits');
+    if (document.activeElement !== tempoRange) tempoRange.value = Math.round(bpmNow);
+    tempoRange.style.setProperty('--p', ((tempoRange.value - 60) / 72 * 100).toFixed(1) + '%');
+    tempoOut.textContent = orbit ? bpmNow.toFixed(1) : String(Math.round(bpmNow));
+  }
+  tempoRange.addEventListener('input', () => {
+    if (model.s.tempoSource !== 'manual') model.setSetting('tempoSource', 'manual');
+    model.setSetting('manualBPM', parseFloat(tempoRange.value));
+    showTempo();
+  });
+  orbitBtn.addEventListener('click', () => { model.setSetting('tempoSource', 'orbit'); showTempo(); });
+
   app.append(
     el('header', { class: 'top' },
       el('div', { class: 'tile', 'aria-hidden': 'true', html: '<small>121</small>Ot' }),
@@ -54,6 +76,7 @@
       el('div', { class: 'side' },
         readEl,
         el('div', { class: 'panel' }, rowsEl),
+        tempoEl,
         playBtn,
         dataNoteEl,
         aboutSection())));
@@ -86,7 +109,7 @@
         el('span', { style: 'color:var(--crew)', text: 'crewed station · gong' })),
       el('p', { text: 'Orbitakt reads where thousands of real satellites are right now, computed in your browser from their published orbits (SGP4, CelesTrak data), and turns the ones overhead into a rhythm.' }),
       el('p', { text: 'A beam sweeps around the sky like a radar. Each drum listens to one family of satellites inside a cone around straight-up, and a satellite sounds when the beam crosses its bearing; the higher it is, the louder. Anything passing nearly straight overhead rings a glass bar.' }),
-      el('p', { text: 'The tempo is the overhead orbits’ own period raised thirteen octaves, so the music slowly drifts with the sky. Without orbital data the page falls back to a simulated sky of the same real shells. Your location, if you share it, is rounded to about a kilometre, stays on your device, and is used only for the sky maths.' }),
+      el('p', { text: 'The scan rate is the overhead orbits’ own period raised thirteen octaves, so the music slowly drifts with the sky. Without orbital data the page falls back to a simulated sky of the same real shells. Your location, if you share it, is rounded to about a kilometre, stays on your device, and is used only for the sky maths.' }),
       el('p', { class: 'small', text: 'Sound by OrbitDSP, a small synthesizer written for this page. Orbital data: CelesTrak. Also an iPhone app.' }));
   }
 
@@ -189,13 +212,13 @@
     group('Music', [
       cellPick('Scale', SCALES.map((s, i) => [i, s.name]), S('scaleIndex'), set('scaleIndex', Number)),
       cellPick('Root', PITCH_NAMES.map((n, i) => [i, n]), S('rootPC'), set('rootPC', Number)),
-      cellSeg('Tempo', [['orbit', 'Orbit'], ['manual', 'Manual']], S('tempoSource'), v => { model.setSetting('tempoSource', v); refreshAll(); }),
-      cellSlider(() => Math.round(model.s.manualBPM) + ' BPM', 60, 132, 1, S('manualBPM'), set('manualBPM'), { hidden: () => model.s.tempoSource !== 'manual' }),
-      cellText(() => 'Orbit tempo: ' + model.orbitBPM.toFixed(1) + ' BPM', () => model.s.tempoSource === 'manual'),
+      cellSeg('Scan rate', [['orbit', 'Orbit'], ['manual', 'Manual']], S('tempoSource'), v => { model.setSetting('tempoSource', v); refreshAll(); }),
+      cellSlider(() => 'Scan rate: ' + Math.round(model.s.manualBPM) + ' bpm', 60, 132, 1, S('manualBPM'), set('manualBPM'), { hidden: () => model.s.tempoSource !== 'manual' }),
+      cellText(() => 'Orbit scan rate: ' + model.orbitBPM.toFixed(1) + ' bpm', () => model.s.tempoSource === 'manual'),
       cellSeg('Sweep', [[2, 'Every 2 bars'], [4, 'Every bar']], S('division'), v => model.setSetting('division', Number(v))),
       cellSlider(() => 'Quantize ' + pct(model.s.quantize), 0, 1, 0.01, S('quantize'), set('quantize'), { ends: ['Literal', 'Grid'], aria: 'Quantize' }),
       cellSlider(() => 'Swing: ' + pct(model.s.swing), 0, 0.4, 0.01, S('swing'), set('swing')),
-    ], 'Orbit tempo is the period of the low orbits overhead, thirteen octaves up: a 95-minute orbit × 2¹³ ≈ 86 BPM. The beam goes round your sky once per sweep, starting at north, and every satellite in a cone plays as the beam passes it. Literal plays each one exactly at its bearing; Grid snaps them to 16 slots per sweep. Swing applies to the grid.'),
+    ], 'Orbit scan rate is the period of the low orbits overhead, thirteen octaves up: a 95-minute orbit × 2¹³ ≈ 86 bpm. The beam goes round your sky once per sweep, starting at north, and every satellite in a cone plays as the beam passes it. Literal plays each one exactly at its bearing; Grid snaps them to 16 slots per sweep. Swing applies to the grid.'),
     group('Dub', [
       cellSlider(() => 'Dub echo feedback: ' + pct(model.s.dub), 0, 0.85, 0.01, S('dub'), set('dub')),
       cellSlider(() => 'Plate: ' + pct(model.s.space), 0, 1, 0.01, S('space'), set('space')),
@@ -263,6 +286,7 @@
     vals.push(model.effectiveBPM.toFixed(1));
     vals.forEach((v, i) => { if (readRefs[i].textContent !== v) readRefs[i].textContent = v; });
     dataNoteEl.textContent = model.dataNote;
+    showTempo();
     model.tracks.forEach((tr, t) => {
       rowRefs[t].info.textContent = tr.hits.length + ' ' + SPECS[t].sound;
       rowRefs[t].label.setAttribute('aria-pressed', tr.muted ? 'true' : 'false');

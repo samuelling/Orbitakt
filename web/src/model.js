@@ -119,6 +119,9 @@ class RhythmModel {
       case 'space': this.engine.setSpace(v); break;
       case 'useLive': this._reloadCatalog(); break;
       case 'place': this._applyPlace(); break;
+      case 'manualBPM': case 'tempoSource':          // answer at once, not at the next sky tick
+        this.effectiveBPM = this.s.tempoSource === 'orbit' ? this.orbitBPM : this.s.manualBPM;
+        this.engine.set('bpm', this.effectiveBPM); break;
     }
     this._save();
     this._emit();
