@@ -147,7 +147,15 @@ class OrbitEngine {
    *  looping <audio> element, and the audio session type where the browser supports it, fix that. */
   _unlockiOS() {
     try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
-    if (this.keepAlive) { this.keepAlive.play().catch(() => {}); return; }
+    const a = this.mediaElement();
+    if (a) a.play().catch(() => {});
+  }
+
+  /** The silent looping <audio> element. Safari treats the page as playing media while it runs
+   *  (so the ringer switch doesn't mute us, the lock screen shows us, and the AirPlay picker can
+   *  be opened from it). Built on demand, so the AirPlay button can use it before Play. */
+  mediaElement() {
+    if (this.keepAlive) return this.keepAlive;
     try {
       const sr = 8000, n = 800, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
       const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
@@ -157,9 +165,10 @@ class OrbitEngine {
       const a = new Audio(URL.createObjectURL(new Blob([buf], { type: 'audio/wav' })));
       a.loop = true; a.volume = 0.01;
       a.setAttribute('playsinline', '');
+      a.setAttribute('x-webkit-airplay', 'allow');
       this.keepAlive = a;
-      a.play().catch(() => {});
     } catch (e) {}
+    return this.keepAlive;
   }
 
   _releaseiOS() { try { this.keepAlive && this.keepAlive.pause(); } catch (e) {} }

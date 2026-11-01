@@ -22,6 +22,7 @@
   const ICON_SLIDERS = icon('<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>');
   const ICON_WAVES = icon('<circle cx="7" cy="17" r="1.6" fill="currentColor" stroke="none"/><path d="M7 11.5a5.5 5.5 0 0 1 5.5 5.5M7 6a11 11 0 0 1 11 11"/>');
   const ICON_STOP = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/></svg>';
+  const ICON_AIRPLAY = icon('<path d="M6.2 16.8A8 8 0 1 1 17.8 16.8"/><path d="M9 14a4.2 4.2 0 1 1 6 0"/><path d="M12 14.6l4.6 5.4H7.4z" fill="currentColor" stroke="none"/>');
   const ICON_CREW = icon('<circle cx="9" cy="8" r="3"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0"/><circle cx="17" cy="9" r="2.3"/><path d="M15.5 14.2A4.5 4.5 0 0 1 21 18.5"/>');
 
   const hexA = (hex, a) => {
@@ -39,6 +40,8 @@
   const playBtn = el('button', { id: 'play', class: 'play', type: 'button' });
   const statusEl = el('div', { class: 'status', role: 'status' });
   const crewEl = el('div', { class: 'badge', html: ICON_CREW + '<span></span>' });
+  const airBtn = el('button', { type: 'button', class: 'iconbtn', 'aria-label': 'AirPlay', title: 'AirPlay', hidden: '', html: ICON_AIRPLAY });
+  const airTip = el('div', { class: 'tip', role: 'note', hidden: '' });
   const gearBtn = el('button', { type: 'button', class: 'iconbtn', 'aria-label': 'Settings', 'aria-haspopup': 'dialog', html: ICON_SLIDERS });
   const rowsEl = el('div', { class: 'rows' });
   const readEl = el('div', { class: 'readings' });
@@ -70,7 +73,8 @@
     el('header', { class: 'top' },
       el('div', { class: 'tile', 'aria-hidden': 'true', html: '<small>121</small>Ot' }),
       el('div', { class: 'titles' }, el('h1', { text: 'ORBITAKT' }), statusEl, crewEl),
-      gearBtn),
+      airBtn, gearBtn),
+    airTip,
     el('main', { class: 'stage' },
       el('div', { class: 'domewrap' }, domeCanvas),
       el('div', { class: 'side' },
@@ -252,6 +256,52 @@
 
   const refreshAll = () => refreshers.forEach(f => f());
 
+
+  // ---------- AirPlay ----------
+  // Safari opens the AirPlay picker only from a media element, so we use the silent <audio> that
+  // keeps the page "playing media". On iPhone and iPad the route chosen there carries all of the
+  // page's sound, Web Audio included. A Mac's Safari would AirPlay only that silent element, so
+  // there the button explains the Mac's own Sound output instead, which sends everything.
+  const media = engine.mediaElement();
+  const isMac = /Macintosh/.test(navigator.userAgent) && !(navigator.maxTouchPoints > 1);
+  const canPick = !!(window.WebKitPlaybackTargetAvailabilityEvent && media && media.webkitShowPlaybackTargetPicker);
+  if (canPick || isMac) airBtn.hidden = false;
+  const showTip = text => { airTip.textContent = text; airTip.hidden = false; };
+  document.addEventListener('click', e => { if (!airTip.hidden && e.target !== airBtn && !airBtn.contains(e.target)) airTip.hidden = true; });
+  airBtn.addEventListener('click', () => {
+    if (isMac) {
+      showTip(airTip.hidden ? 'On a Mac, choose your AirPlay speaker from Control Center › Sound (or the Sound menu in the menu bar). Orbitakt plays through whatever the Mac is sending sound to.' : '');
+      if (!airTip.textContent) airTip.hidden = true;
+      return;
+    }
+    try { media.webkitShowPlaybackTargetPicker(); }
+    catch (e) { showTip('AirPlay isn’t available here. On iPhone, open Control Center and pick a speaker from the Now Playing tile.'); }
+  });
+  if (media) media.addEventListener('webkitcurrentplaybacktargetiswirelesschanged', () => {
+    const on = !!media.webkitCurrentPlaybackTargetIsWireless;
+    airBtn.classList.toggle('on', on);
+    airBtn.setAttribute('aria-label', on ? 'AirPlay (on)' : 'AirPlay');
+  });
+
+  // Lock screen and Control Center: show Orbitakt as Now Playing, with play and pause
+  const ms = navigator.mediaSession;
+  function nowPlaying() {
+    if (!ms) return;
+    try {
+      ms.metadata = new MediaMetadata({
+        title: 'Orbitakt', artist: 'The sky over ' + model.placeName, album: 'Satellites overhead',
+        artwork: [{ src: new URL('../icon.png', location.href).href, sizes: '1024x1024', type: 'image/png' }],
+      });
+      ms.playbackState = model.isPlaying ? 'playing' : 'paused';
+    } catch (e) {}
+  }
+  if (ms) {
+    const act = (a, f) => { try { ms.setActionHandler(a, f); } catch (e) {} };
+    act('play', () => { if (!model.isPlaying) playBtn.click(); });
+    act('pause', () => { if (model.isPlaying) playBtn.click(); });
+    act('stop', () => { if (model.isPlaying) playBtn.click(); });
+  }
+
   // ---------- Buttons and state ----------
   let wake = null;
   async function wantWake() {
@@ -277,6 +327,7 @@
       shownPlaying = model.isPlaying;
       playBtn.innerHTML = (model.isPlaying ? ICON_STOP : ICON_WAVES) + '<span>' + (model.isPlaying ? 'Stop' : 'Play the sky') + '</span>';
       playBtn.setAttribute('aria-pressed', model.isPlaying ? 'true' : 'false');
+      nowPlaying();
     }
     statusEl.textContent = model.status;
     crewEl.lastChild.textContent = model.crewNote || '';
