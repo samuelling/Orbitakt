@@ -192,6 +192,14 @@ h1 { margin: 0; font: 300 22px/1.15 var(--mono); letter-spacing: .3em; color: #f
 .linkbtn { background: none; border: 0; padding: 0; color: var(--accent-hi); font-size: 15px; cursor: pointer; text-align: left; }
 .linkbtn:disabled { color: var(--dim); cursor: default; }
 
+/* ---------- Phones: Play right under the dome, and everything above the fold ---------- */
+@media (max-width: 899px) {
+  .side > .play { order: -1; }
+  .domewrap { width: min(100%, calc(100vh - 200px)); margin: 0 auto; }
+  @supports (height: 100svh) { .domewrap { width: min(100%, calc(100svh - 200px)); } }
+  .domewrap { min-width: 240px; }
+}
+
 /* ---------- Wide screens: dome left, instrument right ---------- */
 @media (min-width: 900px) {
   #app { max-width: 1160px; padding-top: 28px; }
